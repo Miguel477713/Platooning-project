@@ -1,0 +1,26 @@
+#Show connections. If netplan prefix, config comes from /etc/netplan/.yaml
+nmcli connection show
+
+#delete connections
+sudo nmcli connection delete "INFINITUMC39D_2.4"
+
+#create pass hash to insert in .yaml
+wpa_passphrase "HUAWEI-E1HXYZ_Wi-Fi" "real_wifi_password"
+
+#create tailscale connection
+sudo tailscale up --auth-key=KEY --hostname=robot-control-laptop
+
+#To prove .yaml is correct
+sudo netplan generate
+sudo netplan apply
+
+#To see what config Netplan is generating internally
+sudo netplan get
+
+#In headless linux
+    #To scan Wi-Fi signals
+    sudo nmcli device wifi list
+
+    #Connect to specific band
+    sudo nmcli device wifi connect "HUAWEI-E1HX9L" password "YOUR_WIFI_PASSWORD" bssid A4:AA:FE:A5:AA:0C
+

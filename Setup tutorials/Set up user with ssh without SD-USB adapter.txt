@@ -1,0 +1,42 @@
+#Create boot on linux using the SD slot in a functional raspberry
+xzcat image.img.xz | sudo dd of=/dev/mmcblk0 bs=4M status=progress conv=fsync
+
+#Mount the devices
+lsblk
+sudo mount /dev/devicename /mnt/root/
+sudo mount /dev/devicename /mnt/boot/
+
+#create empty ssh file in boot partition (not root partition)
+
+#In root partition
+    #In mounted device, search for users and verify whether bash is assigned
+    #show user accounts in the mounted Raspberry OS that have home folders.
+    cat /mnt/root/etc/passwd | grep "/home"
+
+        #if no bash assigned to any user, do
+        sudo chroot /mnt/root /bin/bash
+        adduser migue
+        usermod -aG sudo migue
+        exit
+
+    #Copy netplan from functional unit (USB/SSD) configured with raspberry imager to non-ssh-enabled root partition
+    sudo cp /etc/netplan/*.yaml /mnt/root/etc/netplan/
+    sudo chmod 600 /mnt/root/etc/netplan/*.yaml
+    sudo chown root:root /mnt/root/etc/netplan/*.yaml
+
+    #Query the hostname for ssh
+    cat /mnt/root/etc/hosts
+
+    #See automatic assignment in router list (use preferably ethernet)
+
+    #Disable first-time setup pop-ups
+    sudo systemctl disable userconfig
+    sudo rm -f /etc/xdg/autostart/piwiz.desktop
+    sudo userdel -r rpi-first-boot-wizard
+
+#In advanced options, change from Wayland or to X (to fix gray screen issue) and activate autologin. 
+#In interfaces, enable VNC.
+#In display options, set resolution
+sudo raspi-config
+
+

@@ -1,0 +1,28 @@
+network:
+  version: 2
+  renderer: NetworkManager
+
+  ethernets:
+    eth0:
+      dhcp4: false
+      optional: true
+      addresses:
+        - 192.168.10.2/24
+
+  wifis:
+    wlan0:
+      dhcp4: false
+      optional: true
+      addresses:
+        - 192.168.1.50/24
+      routes:
+        - to: default
+          via: 192.168.1.1
+          metric: 100
+      nameservers:
+        addresses:
+          - 1.1.1.1
+          - 9.9.9.9
+      access-points:
+        "WIFI_NAME":
+          password: "WIFI_PASSWORD"
