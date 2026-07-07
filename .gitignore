@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.DS_Store
+.idea/
+.vscode/
+
+# Prebuilt Freenove desktop app binaries are too large for normal Git hosting.
+FreeNove/Freenove_Big_Hexapod_Robot_Kit_for_Raspberry_Pi/Application/mac/mac
+FreeNove/Freenove_Big_Hexapod_Robot_Kit_for_Raspberry_Pi/Application/windows/windows.exe
