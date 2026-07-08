@@ -40,3 +40,4 @@ sudo mount /dev/devicename /mnt/boot/
 sudo raspi-config
 
 
+s
