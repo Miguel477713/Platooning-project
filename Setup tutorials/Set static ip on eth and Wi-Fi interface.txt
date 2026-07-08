@@ -22,5 +22,5 @@ sudo netplan get
     sudo nmcli device wifi list
 
     #Connect to specific band
-    sudo nmcli device wifi connect "HUAWEI-E1HX9L" password "YOUR_WIFI_PASSWORD" bssid A4:AA:FE:A5:AA:0C
+    sudo nmcli device wifi connect "HUAWEI-E1HX9L" password "WIFI_PASSWORD" bssid A4:AA:FE:A5:AA:0C
 
