@@ -2,6 +2,7 @@ import os
 import time
 import math
 import threading
+import argparse
 
 # Set before importing/using VideoCapture where possible.
 # These options reduce RTSP buffering/latency with OpenCV FFmpeg backend.
@@ -16,30 +17,108 @@ from flask import Flask, Response
 
 RTSP_URL = os.getenv(
     "RTSP_URL",
-    "rtsp://oliversina134:12345678@10.0.7.10:554/stream1"
+    "rtsp://oliversina135:12345678@10.0.7.12:554/stream1"
 )
 
 MIN_AREA = int(os.getenv("MIN_AREA", "300"))
 TARGET_FPS = float(os.getenv("TARGET_FPS", "30"))
 PROCESS_WIDTH = int(os.getenv("PROCESS_WIDTH", "0"))  # 0 disables resize
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "95"))
+DEFAULT_CALIBRATION_DISTANCE = 100.0
+
+# Blue is used only for the four calibration markers. Adjust this with
+# colorPicker.py if the actual markers are a different shade of blue.
+BLUE_MARKER_RANGES = [
+    # Tuned around the blue marker center: HSV (103, 167, 127).
+    # This excludes the dark-blue chair center: HSV (109, 189, 104).
+    ((98, 125, 115), (106, 205, 160)),
+    # Lighter sunlit blue marker center: HSV (105, 153, 211).
+    ((97, 83, 141), (113, 223, 255)),
+    # Darker blue marker center: HSV (103, 123, 143).
+    ((95, 53, 73), (111, 193, 213)),
+]
 
 app = Flask(__name__)
+calibration = None
 
 COLORS = {
-    "red": [
-        ((0, 80, 80), (10, 255, 255)),
-        ((170, 80, 80), (180, 255, 255)),
-    ],
-    "blue": [
-        ((90, 80, 80), (130, 255, 255)),
+    # HSV ranges tuned from rosa.png (#e8428c) and verde.png (#679341).
+    "pink": [
+        ((160, 100, 100), (175, 255, 255)),
     ],
     "green": [
-        ((35, 60, 60), (85, 255, 255)),
+        ((38, 70, 70), (55, 255, 255)),
+        ((38, 49, 87), (54, 189, 227))
     ],
 }
 
 DRAW_COLOR = (255, 255, 255)
+CALIBRATION_COLOR = (255, 0, 0)
+
+
+class HomographyCalibration:
+    """Maps image points onto the real rectangle defined by blue markers."""
+
+    def __init__(self, top, right, bottom, left, unit):
+        self.top = top
+        self.right = right
+        self.bottom = bottom
+        self.left = left
+        self.unit = unit
+        self.transform = None
+        self.ordered_corners = None
+        self.calibrated_at = None
+        # A homography needs rectangular world coordinates. Averaging opposite
+        # sides tolerates small measuring errors while preserving that shape.
+        self.width = (top + bottom) / 2.0
+        self.height = (right + left) / 2.0
+
+    def GetTransform(self, blue_points):
+        if len(blue_points) != 4:
+            return None, None
+
+        source_points = OrderRectangleCorners(blue_points)
+        destination_points = np.float32([
+            [0, 0],
+            [self.width, 0],
+            [self.width, self.height],
+            [0, self.height],
+        ])
+        transform = cv2.getPerspectiveTransform(source_points, destination_points)
+        return transform, source_points
+
+    def Distance(self, transform, point_a, point_b):
+        image_points = np.float32([[point_a], [point_b]])
+        world_points = cv2.perspectiveTransform(image_points, transform).reshape(2, 2)
+        return float(np.linalg.norm(world_points[1] - world_points[0]))
+
+    def TryInitialize(self, blue_points):
+        if self.transform is not None or len(blue_points) != 4:
+            return False
+
+        transform, ordered_corners = self.GetTransform(blue_points)
+        if transform is None:
+            return False
+
+        self.transform = transform
+        self.ordered_corners = ordered_corners
+        self.calibrated_at = time.time()
+        return True
+
+    def GetCachedTransform(self):
+        return self.transform, self.ordered_corners
+
+
+def OrderRectangleCorners(points):
+    """Return four image points as top-left, top-right, bottom-right, bottom-left."""
+    points = np.float32(points)
+    sorted_by_y = points[np.argsort(points[:, 1])]
+    top = sorted_by_y[:2]
+    bottom = sorted_by_y[2:]
+
+    top = top[np.argsort(top[:, 0])]
+    bottom = bottom[np.argsort(bottom[:, 0])]
+    return np.float32([top[0], top[1], bottom[1], bottom[0]])
 
 
 class LatestFrameGrabber:
@@ -181,7 +260,7 @@ def ResizeForProcessing(frame):
     return cv2.resize(frame, (PROCESS_WIDTH, new_height), interpolation=cv2.INTER_AREA)
 
 
-def FindBlobCenter(hsv, ranges):
+def BuildColorMask(hsv, ranges):
     mask_total = None
 
     for lower, upper in ranges:
@@ -193,6 +272,11 @@ def FindBlobCenter(hsv, ranges):
     kernel = np.ones((5, 5), np.uint8)
     mask_total = cv2.erode(mask_total, kernel, iterations=1)
     mask_total = cv2.dilate(mask_total, kernel, iterations=2)
+    return mask_total
+
+
+def FindBlobCenters(hsv, ranges):
+    mask_total = BuildColorMask(hsv, ranges)
 
     contours, _ = cv2.findContours(
         mask_total,
@@ -200,22 +284,26 @@ def FindBlobCenter(hsv, ranges):
         cv2.CHAIN_APPROX_SIMPLE,
     )
 
-    if not contours:
-        return None
+    centers = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < MIN_AREA:
+            continue
 
-    largest = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(largest)
+        moments = cv2.moments(contour)
+        if moments["m00"] == 0:
+            continue
 
-    if area < MIN_AREA:
-        return None
+        cx = int(moments["m10"] / moments["m00"])
+        cy = int(moments["m01"] / moments["m00"])
+        centers.append((cx, cy, area))
 
-    moments = cv2.moments(largest)
-    if moments["m00"] == 0:
-        return None
+    return sorted(centers, key=lambda item: item[2], reverse=True)
 
-    cx = int(moments["m10"] / moments["m00"])
-    cy = int(moments["m01"] / moments["m00"])
-    return cx, cy, area
+
+def FindBlobCenter(hsv, ranges):
+    centers = FindBlobCenters(hsv, ranges)
+    return centers[0] if centers else None
 
 
 def DistancePixels(p1, p2):
@@ -228,6 +316,92 @@ def DistancePixels(p1, p2):
 def ProcessFrame(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     positions = {}
+
+    transform = None
+    ordered_corners = None
+    status_text = "calibration: not configured"
+
+    if calibration is not None:
+        transform, ordered_corners = calibration.GetCachedTransform()
+
+        if transform is None:
+            blue_markers = FindBlobCenters(hsv, BLUE_MARKER_RANGES)
+            # FindBlobCenters sorts by area, so retain the four most prominent
+            # blobs when extra blue objects are visible during startup.
+            calibration_markers = blue_markers[:4]
+            blue_points = [(cx, cy) for cx, cy, _ in calibration_markers]
+
+            for index, (cx, cy, _area) in enumerate(calibration_markers, start=1):
+                cv2.circle(frame, (cx, cy), 12, CALIBRATION_COLOR, 2)
+                cv2.putText(
+                    frame,
+                    f"blue {index}",
+                    (cx + 15, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    CALIBRATION_COLOR,
+                    2,
+                )
+
+            if calibration.TryInitialize(blue_points):
+                transform, ordered_corners = calibration.GetCachedTransform()
+                status_text = (
+                    f"calibration: saved transform from {len(blue_points)} blue markers"
+                )
+            else:
+                status_text = (
+                    f"calibration: waiting for 4 blue markers - {len(blue_points)} found"
+                )
+        else:
+            status_text = "calibration: using saved transform - recalibrate if camera moved"
+
+    if ordered_corners is not None:
+        polygon = ordered_corners.astype(np.int32).reshape((-1, 1, 2))
+        cv2.polylines(frame, [polygon], True, CALIBRATION_COLOR, 2)
+        corner_names = ("top-left", "top-right", "bottom-right", "bottom-left")
+        for index, point in enumerate(ordered_corners.astype(np.int32), start=1):
+            point_tuple = tuple(point)
+            cv2.circle(frame, point_tuple, 10, CALIBRATION_COLOR, 2)
+            cv2.putText(
+                frame,
+                corner_names[index - 1],
+                (point_tuple[0] + 12, point_tuple[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                CALIBRATION_COLOR,
+                2,
+            )
+
+        edge_lengths = (
+            calibration.width,
+            calibration.height,
+            calibration.width,
+            calibration.height,
+        )
+        ordered_points = ordered_corners.astype(np.int32)
+        for index, edge_length in enumerate(edge_lengths):
+            point_a = ordered_points[index]
+            point_b = ordered_points[(index + 1) % 4]
+            midpoint = ((point_a + point_b) / 2).astype(int)
+            cv2.putText(
+                frame,
+                f"{edge_length:g} {calibration.unit}",
+                tuple(midpoint),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                CALIBRATION_COLOR,
+                2,
+            )
+
+    cv2.putText(
+        frame,
+        status_text,
+        (20, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        CALIBRATION_COLOR,
+        2,
+    )
 
     for color_name, ranges in COLORS.items():
         result = FindBlobCenter(hsv, ranges)
@@ -248,7 +422,7 @@ def ProcessFrame(frame):
             )
 
     names = sorted(positions.keys())
-    y_text = 30
+    y_text = 60
 
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
@@ -256,16 +430,25 @@ def ProcessFrame(frame):
             name_b = names[j]
             p1 = positions[name_a]
             p2 = positions[name_b]
-            d, dx, dy = DistancePixels(p1, p2)
-
             cv2.line(frame, p1, p2, DRAW_COLOR, 2)
 
             mid_x = int((p1[0] + p2[0]) / 2)
             mid_y = int((p1[1] + p2[1]) / 2)
+            is_green_pink_pair = {name_a, name_b} == {"green", "pink"}
+
+            if calibration is not None and transform is not None and is_green_pink_pair:
+                real_distance = calibration.Distance(transform, p1, p2)
+                distance_label = (
+                    f"{name_a}-{name_b}: {real_distance:.2f} {calibration.unit}"
+                )
+            elif is_green_pink_pair:
+                distance_label = f"{name_a}-{name_b}: calibration needed"
+            else:
+                continue
 
             cv2.putText(
                 frame,
-                f"{name_a}-{name_b}: {d:.1f}px",
+                distance_label,
                 (mid_x, mid_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -275,7 +458,7 @@ def ProcessFrame(frame):
 
             cv2.putText(
                 frame,
-                f"{name_a}-{name_b}: dx={dx}px dy={dy}px d={d:.1f}px",
+                distance_label,
                 (20, y_text),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -289,6 +472,94 @@ def ProcessFrame(frame):
 
 grabber = LatestFrameGrabber(RTSP_URL)
 worker = ProcessedJpegWorker(grabber)
+
+
+def PositiveDistance(value, label):
+    try:
+        distance = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            f"{label} must be a positive number."
+        ) from error
+
+    if distance <= 0:
+        raise argparse.ArgumentTypeError(f"{label} must be greater than zero.")
+    return distance
+
+
+def PromptForDistance(label, supplied_value):
+    if supplied_value is not None:
+        return PositiveDistance(supplied_value, label)
+
+    while True:
+        try:
+            return PositiveDistance(input(f"{label} side length: "), label)
+        except argparse.ArgumentTypeError as error:
+            print(error)
+
+
+def ConfigureCalibration():
+    parser = argparse.ArgumentParser(
+        description="Measure pink-green distance using four blue rectangle markers."
+    )
+    parser.add_argument(
+        "--top",
+        default=DEFAULT_CALIBRATION_DISTANCE,
+        help="Top side length (default: 100)",
+    )
+    parser.add_argument(
+        "--right",
+        default=DEFAULT_CALIBRATION_DISTANCE,
+        help="Right side length (default: 100)",
+    )
+    parser.add_argument(
+        "--bottom",
+        default=DEFAULT_CALIBRATION_DISTANCE,
+        help="Bottom side length (default: 100)",
+    )
+    parser.add_argument(
+        "--left",
+        default=DEFAULT_CALIBRATION_DISTANCE,
+        help="Left side length (default: 100)",
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt for all four side lengths instead of using command-line defaults",
+    )
+    parser.add_argument(
+        "--unit",
+        default=os.getenv("DISTANCE_UNIT", "cm"),
+        help="Unit used for all four side lengths (default: cm)",
+    )
+    args = parser.parse_args()
+
+    if args.interactive:
+        print("Enter the real side lengths of the rectangle formed by the 4 blue markers.")
+        print(f"All values use the same unit: {args.unit}")
+        top = PromptForDistance("Top", None)
+        right = PromptForDistance("Right", None)
+        bottom = PromptForDistance("Bottom", None)
+        left = PromptForDistance("Left", None)
+    else:
+        top = PromptForDistance("Top", args.top)
+        right = PromptForDistance("Right", args.right)
+        bottom = PromptForDistance("Bottom", args.bottom)
+        left = PromptForDistance("Left", args.left)
+        print(
+            f"Calibration rectangle: top={top:g}, right={right:g}, "
+            f"bottom={bottom:g}, left={left:g} {args.unit}"
+        )
+
+    difference_width = abs(top - bottom)
+    difference_height = abs(right - left)
+    if difference_width > 0.01 or difference_height > 0.01:
+        print(
+            "Note: opposite sides differ. Calibration uses their averages "
+            "because the blue markers must describe a rectangle."
+        )
+
+    return HomographyCalibration(top, right, bottom, left, args.unit)
 
 
 def GenerateFrames():
@@ -333,5 +604,6 @@ def video():
 
 
 if __name__ == "__main__":
+    calibration = ConfigureCalibration()
     worker.Start()
     app.run(host="0.0.0.0", port=5000, threaded=True)
