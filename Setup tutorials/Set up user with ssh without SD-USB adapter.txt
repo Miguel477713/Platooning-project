@@ -38,6 +38,3 @@ sudo mount /dev/devicename /mnt/boot/
 #In interfaces, enable VNC.
 #In display options, set resolution
 sudo raspi-config
-
-
-s

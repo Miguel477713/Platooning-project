@@ -29,12 +29,15 @@ def hex_to_opencv_hsv_range(hex_color, h_tol=8, s_tol=70, v_tol=70):
     return hsv_pixel.tolist(), lower, upper
 
 
-center, lower, upper = hex_to_opencv_hsv_range("#779d54") # verde
-center, lower, upper = hex_to_opencv_hsv_range("#2c5b7f") #azul de cartulina oscuro
-center, lower, upper = hex_to_opencv_hsv_range("#5492d3") #azul de cartulina claro
-center, lower, upper = hex_to_opencv_hsv_range("#4a708f") #azul de cartulina oscuro
-# center, lower, upper = hex_to_opencv_hsv_range("#1b3768") # azul de sofas
+# center, lower, upper = hex_to_opencv_hsv_range("#779d54") # verde
+# center, lower, upper = hex_to_opencv_hsv_range("#2c5b7f") #azul de cartulina oscuro
+# center, lower, upper = hex_to_opencv_hsv_range("#5492d3") #azul de cartulina claro
+# center, lower, upper = hex_to_opencv_hsv_range("#4a708f") #azul de cartulina oscuro
+# # center, lower, upper = hex_to_opencv_hsv_range("#1b3768") # azul de sofas
 
+center, lower, upper = hex_to_opencv_hsv_range("#507089") #azul claro
+# center, lower, upper = hex_to_opencv_hsv_range("#b4defe") # azul mas claro aun 
+# center, lower, upper = hex_to_opencv_hsv_range("#7b9cbc")
 print("center:", center)
 print("lower:", lower)
 print("upper:", upper)
