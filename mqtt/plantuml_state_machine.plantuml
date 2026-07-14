@@ -1,0 +1,54 @@
+@startuml
+title Follower Robot State Machine - Blob Color Platooning
+
+hide empty description
+
+[*] --> WAIT_FOR_ASSIGNMENT
+
+WAIT_FOR_ASSIGNMENT : stop_motors()
+WAIT_FOR_ASSIGNMENT : wait for MQTT assignment
+WAIT_FOR_ASSIGNMENT --> GLOBAL_SEARCH : receive ASSIGNMENT\nset initial target/color
+
+GLOBAL_SEARCH : global_detect(current_target_color)
+GLOBAL_SEARCH : if not detected -> global_search_motion()
+GLOBAL_SEARCH --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
+GLOBAL_SEARCH --> GLOBAL_SEARCH : target not detected
+
+GLOBAL_APPROACH : global_detect(current_target_color)
+GLOBAL_APPROACH : approach current target
+GLOBAL_APPROACH --> LOST_TARGET : target not detected\nand timeout exceeded
+GLOBAL_APPROACH --> GLOBAL_APPROACH : target detected\nbut distance > goal
+GLOBAL_APPROACH --> LOCAL_LOCK : reached goal\nand current target == final target
+GLOBAL_APPROACH --> WAIT_FOR_FINAL_TARGET_READY : reached wait zone\nbut current target != final target
+
+WAIT_FOR_FINAL_TARGET_READY : stop_motors()
+WAIT_FOR_FINAL_TARGET_READY : wait for final target event
+WAIT_FOR_FINAL_TARGET_READY --> GLOBAL_SEARCH : final target ready\nswitch to final target/color
+
+LOCAL_LOCK : local_detect(current_target_color)
+LOCAL_LOCK : align with target
+LOCAL_LOCK : count stable frames
+LOCAL_LOCK --> LOST_TARGET : local target not detected
+LOCAL_LOCK --> LOCAL_LOCK : lock not stable yet
+LOCAL_LOCK --> LOCAL_FOLLOW : stable lock acquired\npublish LOCAL_LOCK_ACQUIRED
+
+LOCAL_FOLLOW : local_detect(current_target_color)
+LOCAL_FOLLOW : local_follow_motion(result)
+LOCAL_FOLLOW --> LOCAL_FOLLOW : target detected\ncontinue following
+LOCAL_FOLLOW --> LOST_TARGET : target lost\npublish TARGET_LOST_LOCAL
+
+LOST_TARGET : stop_motors()
+LOST_TARGET --> GLOBAL_SEARCH : search again\nfor current target
+
+EMERGENCY_STOP : stop_motors()
+EMERGENCY_STOP --> WAIT_FOR_ASSIGNMENT : RESET
+
+WAIT_FOR_ASSIGNMENT --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
+GLOBAL_SEARCH --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
+GLOBAL_APPROACH --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
+WAIT_FOR_FINAL_TARGET_READY --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
+LOCAL_LOCK --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
+LOCAL_FOLLOW --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
+LOST_TARGET --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
+
+@enduml
