@@ -3,6 +3,8 @@ import time
 import math
 import threading
 import argparse
+import json
+from pathlib import Path
 
 # Set before importing/using VideoCapture where possible.
 # These options reduce RTSP buffering/latency with OpenCV FFmpeg backend.
@@ -13,7 +15,7 @@ os.environ.setdefault(
 
 import cv2
 import numpy as np
-from flask import Flask, Response
+from flask import Flask, Response, jsonify, request
 
 RTSP_URL = os.getenv(
     "RTSP_URL",
@@ -25,32 +27,18 @@ TARGET_FPS = float(os.getenv("TARGET_FPS", "30"))
 PROCESS_WIDTH = int(os.getenv("PROCESS_WIDTH", "0"))  # 0 disables resize
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "95"))
 DEFAULT_CALIBRATION_DISTANCE = 100.0
-# Hue is not meaningful for nearly gray pixels. This prevents the broad,
-# low-saturation calibration range from selecting wall and furniture details.
-BLUE_MARKER_MIN_SATURATION = int(os.getenv("BLUE_MARKER_MIN_SATURATION", "36"))
-
-# Blue is used only for the four calibration markers. Adjust this with
-# colorPicker.py if the actual markers are a different shade of blue.
-BLUE_MARKER_RANGES = [
-    # # Tuned around the blue marker center: HSV (103, 167, 127).
-    # # This excludes the dark-blue chair center: HSV (109, 189, 104).
-    # ((98, 125, 115), (106, 205, 160)),
-    # # Lighter sunlit blue marker center: HSV (105, 153, 211).
-    # ((97, 83, 141), (113, 223, 255)),
-    # # Darker blue marker center: HSV (103, 123, 143).
-    # ((95, 53, 73), (111, 193, 213)),
-
-    # Center: HSV (103, 106, 137).
-    ((95, 36, 67), (111, 176, 207)),
-    # Center: HSV (103, 74, 254).
-    ((95, 4, 184), (111, 144, 255)),
-    # Center: HSV (103, 106, 137).
-    ((95, 36, 67), (111, 176, 207)),
-    
-]
+CALIBRATION_FILE = Path(
+    os.getenv(
+        "CALIBRATION_FILE",
+        Path.home() / ".local" / "share" / "distance_detection2" / "calibration.json",
+    )
+)
 
 app = Flask(__name__)
 calibration = None
+clicked_points = []
+calibration_lock = threading.Lock()
+calibration_mode = False
 
 COLORS = {
     # HSV ranges tuned from rosa.png (#e8428c) and verde.png (#679341).
@@ -68,7 +56,7 @@ CALIBRATION_COLOR = (255, 0, 0)
 
 
 class HomographyCalibration:
-    """Maps image points onto the real rectangle defined by blue markers."""
+    """Maps four user-selected image corners onto a measured rectangle."""
 
     def __init__(self, top, right, bottom, left, unit):
         self.top = top
@@ -84,11 +72,14 @@ class HomographyCalibration:
         self.width = (top + bottom) / 2.0
         self.height = (right + left) / 2.0
 
-    def GetTransform(self, blue_points):
-        if len(blue_points) != 4:
+    def GetTransform(self, points):
+        if len(points) != 4:
             return None, None
 
-        source_points = OrderRectangleCorners(blue_points)
+        # Points arrive in the UI's required order: top-left, top-right,
+        # bottom-right, bottom-left. Keeping that order avoids guessing it
+        # from a perspective-distorted camera image.
+        source_points = np.float32(points)
         destination_points = np.float32([
             [0, 0],
             [self.width, 0],
@@ -103,11 +94,11 @@ class HomographyCalibration:
         world_points = cv2.perspectiveTransform(image_points, transform).reshape(2, 2)
         return float(np.linalg.norm(world_points[1] - world_points[0]))
 
-    def TryInitialize(self, blue_points):
-        if self.transform is not None or len(blue_points) != 4:
+    def TryInitialize(self, points):
+        if self.transform is not None or len(points) != 4:
             return False
 
-        transform, ordered_corners = self.GetTransform(blue_points)
+        transform, ordered_corners = self.GetTransform(points)
         if transform is None:
             return False
 
@@ -118,6 +109,42 @@ class HomographyCalibration:
 
     def GetCachedTransform(self):
         return self.transform, self.ordered_corners
+
+
+def SaveCalibration(points, current_calibration):
+    """Persist the click order and real-world measurements for later runs."""
+    payload = {
+        "points": points,
+        "top": current_calibration.top,
+        "right": current_calibration.right,
+        "bottom": current_calibration.bottom,
+        "left": current_calibration.left,
+        "unit": current_calibration.unit,
+    }
+    CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CALIBRATION_FILE.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def LoadCalibration():
+    if not CALIBRATION_FILE.is_file():
+        return None, []
+
+    try:
+        payload = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+        points = [tuple(point) for point in payload["points"]]
+        current_calibration = HomographyCalibration(
+            PositiveDistance(payload["top"], "Top"),
+            PositiveDistance(payload["right"], "Right"),
+            PositiveDistance(payload["bottom"], "Bottom"),
+            PositiveDistance(payload["left"], "Left"),
+            str(payload.get("unit", "cm")),
+        )
+        if not current_calibration.TryInitialize(points):
+            raise ValueError("Stored calibration does not contain four valid points.")
+        return current_calibration, points
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, argparse.ArgumentTypeError) as error:
+        print(f"Ignoring invalid stored calibration: {error}")
+        return None, []
 
 
 def OrderRectangleCorners(points):
@@ -280,14 +307,6 @@ def BuildColorMask(hsv, ranges):
         mask = cv2.inRange(hsv, lower, upper)
         mask_total = mask if mask_total is None else cv2.bitwise_or(mask_total, mask)
 
-    if ranges is BLUE_MARKER_RANGES:
-        saturation_mask = cv2.inRange(
-            hsv[:, :, 1],
-            BLUE_MARKER_MIN_SATURATION,
-            255,
-        )
-        mask_total = cv2.bitwise_and(mask_total, saturation_mask)
-
     kernel = np.ones((5, 5), np.uint8)
     mask_total = cv2.erode(mask_total, kernel, iterations=1)
     mask_total = cv2.dilate(mask_total, kernel, iterations=2)
@@ -336,43 +355,34 @@ def ProcessFrame(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     positions = {}
 
+    with calibration_lock:
+        active_calibration = calibration
+        points_to_draw = list(clicked_points)
+
     transform = None
     ordered_corners = None
-    status_text = "calibration: not configured"
+    if active_calibration is not None:
+        transform, ordered_corners = active_calibration.GetCachedTransform()
 
-    if calibration is not None:
-        transform, ordered_corners = calibration.GetCachedTransform()
+    if transform is not None:
+        status_text = "calibration: active"
+    elif len(points_to_draw) == 4:
+        status_text = "calibration: enter side lengths and apply"
+    else:
+        status_text = f"calibration: click corner {len(points_to_draw) + 1} of 4"
 
-        if transform is None:
-            blue_markers = FindBlobCenters(hsv, BLUE_MARKER_RANGES)
-            # FindBlobCenters sorts by area, so retain the four most prominent
-            # blobs when extra blue objects are visible during startup.
-            calibration_markers = blue_markers[:4]
-            blue_points = [(cx, cy) for cx, cy, _ in calibration_markers]
-
-            for index, (cx, cy, _area) in enumerate(calibration_markers, start=1):
-                cv2.circle(frame, (cx, cy), 12, CALIBRATION_COLOR, 2)
-                cv2.putText(
-                    frame,
-                    f"blue {index}",
-                    (cx + 15, cy),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    CALIBRATION_COLOR,
-                    2,
-                )
-
-            if calibration.TryInitialize(blue_points):
-                transform, ordered_corners = calibration.GetCachedTransform()
-                status_text = (
-                    f"calibration: saved transform from {len(blue_points)} blue markers"
-                )
-            else:
-                status_text = (
-                    f"calibration: waiting for 4 blue markers - {len(blue_points)} found"
-                )
-        else:
-            status_text = "calibration: using saved transform - recalibrate if camera moved"
+    click_names = ("top-left", "top-right", "bottom-right", "bottom-left")
+    for index, point in enumerate(points_to_draw):
+        cv2.circle(frame, point, 10, CALIBRATION_COLOR, 2)
+        cv2.putText(
+            frame,
+            click_names[index],
+            (point[0] + 12, point[1] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            CALIBRATION_COLOR,
+            2,
+        )
 
     if ordered_corners is not None:
         polygon = ordered_corners.astype(np.int32).reshape((-1, 1, 2))
@@ -392,10 +402,10 @@ def ProcessFrame(frame):
             )
 
         edge_lengths = (
-            calibration.width,
-            calibration.height,
-            calibration.width,
-            calibration.height,
+            active_calibration.width,
+            active_calibration.height,
+            active_calibration.width,
+            active_calibration.height,
         )
         ordered_points = ordered_corners.astype(np.int32)
         for index, edge_length in enumerate(edge_lengths):
@@ -404,7 +414,7 @@ def ProcessFrame(frame):
             midpoint = ((point_a + point_b) / 2).astype(int)
             cv2.putText(
                 frame,
-                f"{edge_length:g} {calibration.unit}",
+                f"{edge_length:g} {active_calibration.unit}",
                 tuple(midpoint),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -455,10 +465,10 @@ def ProcessFrame(frame):
             mid_y = int((p1[1] + p2[1]) / 2)
             is_green_pink_pair = {name_a, name_b} == {"green", "pink"}
 
-            if calibration is not None and transform is not None and is_green_pink_pair:
-                real_distance = calibration.Distance(transform, p1, p2)
+            if active_calibration is not None and transform is not None and is_green_pink_pair:
+                real_distance = active_calibration.Distance(transform, p1, p2)
                 distance_label = (
-                    f"{name_a}-{name_b}: {real_distance:.2f} {calibration.unit}"
+                    f"{name_a}-{name_b}: {real_distance:.2f} {active_calibration.unit}"
                 )
             elif is_green_pink_pair:
                 distance_label = f"{name_a}-{name_b}: calibration needed"
@@ -506,79 +516,77 @@ def PositiveDistance(value, label):
     return distance
 
 
-def PromptForDistance(label, supplied_value):
-    if supplied_value is not None:
-        return PositiveDistance(supplied_value, label)
+def CalibrationState():
+    with calibration_lock:
+        return {
+            "points": list(clicked_points),
+            "calibrated": calibration is not None and calibration.transform is not None,
+            "calibration_mode": calibration_mode,
+        }
 
-    while True:
+
+@app.get("/calibration/state")
+def GetCalibrationState():
+    return jsonify(CalibrationState())
+
+
+@app.post("/calibration/click")
+def AddCalibrationClick():
+    data = request.get_json(silent=True) or {}
+    try:
+        point = (int(round(float(data["x"]))), int(round(float(data["y"]))))
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="Coordinates must be numbers."), 400
+
+    with calibration_lock:
+        if not calibration_mode:
+            return jsonify(error="Restart with --calibrate to change the saved calibration."), 403
+        if len(clicked_points) >= 4:
+            return jsonify(error="Four points are already selected. Reset to recalibrate."), 409
+        clicked_points.append(point)
+
+    return jsonify(CalibrationState())
+
+
+@app.post("/calibration/apply")
+def ApplyCalibration():
+    global calibration
+    data = request.get_json(silent=True) or {}
+    try:
+        top = PositiveDistance(data["top"], "Top")
+        right = PositiveDistance(data["right"], "Right")
+        bottom = PositiveDistance(data["bottom"], "Bottom")
+        left = PositiveDistance(data["left"], "Left")
+    except (KeyError, argparse.ArgumentTypeError) as error:
+        return jsonify(error=str(error)), 400
+
+    unit = str(data.get("unit", "cm")).strip() or "cm"
+    with calibration_lock:
+        if not calibration_mode:
+            return jsonify(error="Restart with --calibrate to change the saved calibration."), 403
+        if len(clicked_points) != 4:
+            return jsonify(error="Click all four corners before applying calibration."), 400
+        new_calibration = HomographyCalibration(top, right, bottom, left, unit)
+        if not new_calibration.TryInitialize(clicked_points):
+            return jsonify(error="Could not create the calibration transform."), 400
+        calibration = new_calibration
         try:
-            return PositiveDistance(input(f"{label} side length: "), label)
-        except argparse.ArgumentTypeError as error:
-            print(error)
+            SaveCalibration(clicked_points, calibration)
+        except OSError as error:
+            return jsonify(error=f"Calibration is active but could not be saved: {error}"), 500
+
+    return jsonify(CalibrationState())
 
 
-def ConfigureCalibration():
-    parser = argparse.ArgumentParser(
-        description="Measure pink-green distance using four blue rectangle markers."
-    )
-    parser.add_argument(
-        "--top",
-        default=DEFAULT_CALIBRATION_DISTANCE,
-        help="Top side length (default: 100)",
-    )
-    parser.add_argument(
-        "--right",
-        default=DEFAULT_CALIBRATION_DISTANCE,
-        help="Right side length (default: 100)",
-    )
-    parser.add_argument(
-        "--bottom",
-        default=DEFAULT_CALIBRATION_DISTANCE,
-        help="Bottom side length (default: 100)",
-    )
-    parser.add_argument(
-        "--left",
-        default=DEFAULT_CALIBRATION_DISTANCE,
-        help="Left side length (default: 100)",
-    )
-    parser.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Prompt for all four side lengths instead of using command-line defaults",
-    )
-    parser.add_argument(
-        "--unit",
-        default=os.getenv("DISTANCE_UNIT", "cm"),
-        help="Unit used for all four side lengths (default: cm)",
-    )
-    args = parser.parse_args()
-
-    if args.interactive:
-        print("Enter the real side lengths of the rectangle formed by the 4 blue markers.")
-        print(f"All values use the same unit: {args.unit}")
-        top = PromptForDistance("Top", None)
-        right = PromptForDistance("Right", None)
-        bottom = PromptForDistance("Bottom", None)
-        left = PromptForDistance("Left", None)
-    else:
-        top = PromptForDistance("Top", args.top)
-        right = PromptForDistance("Right", args.right)
-        bottom = PromptForDistance("Bottom", args.bottom)
-        left = PromptForDistance("Left", args.left)
-        print(
-            f"Calibration rectangle: top={top:g}, right={right:g}, "
-            f"bottom={bottom:g}, left={left:g} {args.unit}"
-        )
-
-    difference_width = abs(top - bottom)
-    difference_height = abs(right - left)
-    if difference_width > 0.01 or difference_height > 0.01:
-        print(
-            "Note: opposite sides differ. Calibration uses their averages "
-            "because the blue markers must describe a rectangle."
-        )
-
-    return HomographyCalibration(top, right, bottom, left, args.unit)
+@app.post("/calibration/reset")
+def ResetCalibration():
+    global calibration
+    with calibration_lock:
+        if not calibration_mode:
+            return jsonify(error="Restart with --calibrate to change the saved calibration."), 403
+        clicked_points.clear()
+        calibration = None
+    return jsonify(CalibrationState())
 
 
 def GenerateFrames():
@@ -604,12 +612,108 @@ def GenerateFrames():
 @app.route("/")
 def index():
     return """
-    <html>
-        <body style="background-color:#111;color:white;font-family:Arial;">
-            <h2>Jetson Blob Distance Stream</h2>
-            <p>Using latest-frame mode: old RTSP frames are dropped instead of queued.</p>
-            <img src="/video" style="max-width:100%;">
-        </body>
+    <!doctype html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Distance Calibration</title>
+        <style>
+            body { margin: 0; background: #181818; color: #eee; font: 16px Arial, sans-serif; }
+            main { width: 100vw; }
+            #toolbar { padding: 10px 16px; }
+            #toolbar h2, #toolbar p { margin: 0 0 8px; }
+            img { display: block; width: 100%; max-height: calc(100vh - 120px); cursor: crosshair; object-fit: contain; }
+            fieldset { margin-top: 12px; max-width: 680px; }
+            input { width: 80px; margin: 4px; }
+            button { margin: 8px 8px 0 0; padding: 8px 12px; }
+        </style>
+    </head>
+    <body>
+        <main>
+            <div id="toolbar">
+            <h2>Pink-Green Distance</h2>
+            <p id="status">Loading calibration...</p>
+            <button id="fullscreen" type="button">Fullscreen video</button>
+            <div id="controls">
+            <img id="stream" src="/video" alt="Live video stream">
+            <fieldset id="measurement-controls">
+                <legend>Measured rectangle sides</legend>
+                <label>Top <input id="top" type="number" min="0.001" step="any" value="100"></label>
+                <label>Right <input id="right" type="number" min="0.001" step="any" value="100"></label>
+                <label>Bottom <input id="bottom" type="number" min="0.001" step="any" value="100"></label>
+                <label>Left <input id="left" type="number" min="0.001" step="any" value="100"></label>
+                <label>Unit <input id="unit" value="cm"></label><br>
+                <button id="apply">Apply calibration</button>
+                <button id="reset">Reset points</button>
+            </fieldset>
+            </div>
+            </div>
+        </main>
+        <script>
+            const stream = document.getElementById('stream');
+            const status = document.getElementById('status');
+            const controls = document.getElementById('measurement-controls');
+            const cornerNames = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
+
+            function showState(state) {
+                controls.hidden = !state.calibration_mode;
+                if (!state.calibration_mode && state.calibrated) {
+                    status.textContent = 'Using the saved calibration. Restart with --calibrate to change it.';
+                } else if (state.calibrated) {
+                    status.textContent = 'Calibration active.';
+                } else if (state.points.length < 4) {
+                    status.textContent = `Click ${cornerNames[state.points.length]} (${state.points.length + 1} of 4).`;
+                } else {
+                    status.textContent = 'Enter the measured side lengths, then apply calibration.';
+                }
+            }
+
+            async function post(url, body) {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body || {}),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Request failed.');
+                return data;
+            }
+
+            async function refreshState() {
+                const response = await fetch('/calibration/state');
+                showState(await response.json());
+            }
+
+            stream.addEventListener('click', async (event) => {
+                const rect = stream.getBoundingClientRect();
+                const x = (event.clientX - rect.left) * stream.naturalWidth / rect.width;
+                const y = (event.clientY - rect.top) * stream.naturalHeight / rect.height;
+                try { showState(await post('/calibration/click', { x, y })); }
+                catch (error) { status.textContent = error.message; }
+            });
+
+            document.getElementById('apply').addEventListener('click', async () => {
+                const body = {};
+                for (const id of ['top', 'right', 'bottom', 'left', 'unit']) {
+                    body[id] = document.getElementById(id).value;
+                }
+                try { showState(await post('/calibration/apply', body)); }
+                catch (error) { status.textContent = error.message; }
+            });
+
+            document.getElementById('reset').addEventListener('click', async () => {
+                try { showState(await post('/calibration/reset')); }
+                catch (error) { status.textContent = error.message; }
+            });
+
+            document.getElementById('fullscreen').addEventListener('click', () => {
+                stream.requestFullscreen();
+            });
+
+            refreshState();
+        </script>
+    </body>
     </html>
     """
 
@@ -623,6 +727,27 @@ def video():
 
 
 if __name__ == "__main__":
-    calibration = ConfigureCalibration()
+    parser = argparse.ArgumentParser(
+        description="Measure pink-green distance using a saved click calibration."
+    )
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="Select four new corners and enter their measured side lengths.",
+    )
+    args = parser.parse_args()
+
+    if args.calibrate:
+        calibration_mode = True
+        print("Calibration mode: select four corners in the browser.")
+    else:
+        calibration, stored_points = LoadCalibration()
+        if calibration is None:
+            calibration_mode = True
+            print("No saved calibration found. Calibration is required in the browser.")
+        else:
+            clicked_points[:] = stored_points
+            print(f"Loaded saved calibration from {CALIBRATION_FILE}")
+
     worker.Start()
     app.run(host="0.0.0.0", port=5000, threaded=True)
