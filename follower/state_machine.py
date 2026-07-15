@@ -249,11 +249,17 @@ class FollowerStateMachine:
     def reached_global_approach_goal(self, result: DetectionResult) -> bool:
         if self.assignment is None:
             return False
-        if result.distance_m is None:
-            return False
 
         target_distance = self.get_current_approach_distance()
-        return result.distance_m <= target_distance
+        if result.distance_m is not None:
+            return result.distance_m <= target_distance
+
+        target_area = getattr(result, "target_area", None)
+        target_area_min = getattr(self.impl, "target_area_min", None)
+        if target_area is not None and target_area_min is not None:
+            return target_area >= target_area_min
+
+        return False
 
     def get_current_approach_distance(self) -> float:
         if self.assignment is None:

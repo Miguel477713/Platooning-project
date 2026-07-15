@@ -41,6 +41,10 @@ class DetectionResult:
     distance_m: Optional[float] = None
     bearing_deg: Optional[float] = None
     confidence: float = 0.0
+    target_x: Optional[float] = None
+    target_y: Optional[float] = None
+    target_area: Optional[float] = None
+    occluded: bool = False
 
 
 @dataclass

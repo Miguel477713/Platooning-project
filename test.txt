@@ -1,0 +1,39 @@
+Start robot normally, waiting for MQTT assignment.
+Put the target already visible in the camera.
+Publish an assignment manually with mosquitto_pub.
+GLOBAL_SEARCH will run one detection cycle, immediately find the target, then transition to GLOBAL_APPROACH.
+That is not a true state bypass, but it effectively skips search behavior because global_search_motion() now only stops motors.
+
+
+Terminal 1: Watch MQTT
+mosquitto_sub -h 10.0.7.51 -t 'platoon/#' -v
+
+
+Terminal 2: Run Follower
+On the robot/Raspberry Pi:
+python3 -u run_follower.py \
+  --robot-id Hexapod1 \
+  --broker 10.0.7.51 \
+  --lock-tilt
+Keep the target color visible before sending the assignment.
+
+Terminal 3: Publish Manual Assignment
+Example for green target, 35 cm approach distance:
+mosquitto_pub -h 10.0.7.51 \
+  -t 'platoon/assignment/Hexapod1' \
+  -q 1 \
+  -m '{
+    "type": "ASSIGNMENT",
+    "robot_id": "Hexapod1",
+    "initial_target_id": "manual-target",
+    "initial_target_color": "green",
+    "final_target_id": "manual-target",
+    "final_target_color": "green",
+    "initial_wait_distance_m": 0.35,
+    "desired_gap_m": 0.35
+  }'
+Expected state flow:
+WAIT_FOR_ASSIGNMENT
+-> GLOBAL_SEARCH
+-> TARGET_FOUND_GLOBAL
+-> GLOBAL_APPROACH
