@@ -70,6 +70,7 @@ def main() -> None:
     parser.add_argument("--pan-max", type=int, default=PAN_MAX, help="Maximum camera pan offset.")
     parser.add_argument("--tilt-max", type=int, default=TILT_MAX, help="Maximum camera tilt offset.")
     parser.add_argument("--camera-only", action="store_true", help="Track with camera but do not walk.")
+    parser.add_argument("--show-video", action="store_true", help="Show direct camera debug window.")
     parser.add_argument("--invert-pan", action="store_true", help="Invert pan correction.")
     parser.add_argument("--invert-tilt", action="store_true", help="Invert tilt correction.")
     parser.add_argument("--lock-tilt", action="store_true", help="Keep vertical camera servo fixed.")
@@ -134,6 +135,7 @@ def main() -> None:
             body_z=args.body_z,
             occluded_target_area_max=args.occluded_target_area_max,
             occlusion_dark_ratio=args.occlusion_dark_ratio,
+            show_video=args.show_video,
         )
     robot = FollowerStateMachine(robot_id=args.robot_id, implementation=implementation)
     handler = FollowerMqttHandler(robot)
@@ -184,6 +186,8 @@ def main() -> None:
         print("[INFO] waiting for assignment...")
     else:
         print("[INFO] local assignment:", args.target_id, args.target_color)
+    if args.show_video:
+        print("[INFO] video: showing direct camera debug window")
 
     try:
         while True:
