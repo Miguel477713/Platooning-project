@@ -36,7 +36,7 @@ CAMERA_CENTER_Y = 75
 TURN_DEADZONE_PAN = 10
 TURN_GAIN = 0.15
 ROTATE_TARGET_X = 0.20
-BODY_Z = 0
+BODY_Z = 20
 OCCLUDED_TARGET_AREA_MAX = 0.025
 OCCLUSION_DARK_RATIO = 0.30
 OCCLUSION_MARGIN = 0.35
@@ -150,6 +150,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         body_z: int = BODY_Z,
         occluded_target_area_max: float = OCCLUDED_TARGET_AREA_MAX,
         occlusion_dark_ratio: float = OCCLUSION_DARK_RATIO,
+        show_video: bool = False,
     ):
         self.speed = clamp(int(speed), SPEED_MIN, SPEED_MAX)
         self.target_area_min = clamp(target_area, 0.01, 0.90)
@@ -166,6 +167,8 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.body_z = clamp(int(body_z), -20, 20)
         self.occluded_target_area_max = clamp(occluded_target_area_max, 0.001, 0.20)
         self.occlusion_dark_ratio = clamp(occlusion_dark_ratio, 0.05, 0.90)
+        self.show_video = show_video
+        self.video_window_name = "Follower Direct Camera"
         self.pan_max = clamp(int(pan_max), 10, 60)
         self.tilt_max = clamp(int(tilt_max), 10, 60)
 
@@ -244,12 +247,13 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
                 self.stop_motors()
             return DetectionResult(detected=False)
 
-        detected, x, y, area, occluded = self.detect_target(frame, target_color)
+        detected, x, y, area, occluded, debug = self.detect_target(frame, target_color)
         distance_cm = self.request_ultrasonic_distance()
         distance_m = None if distance_cm is None else distance_cm / 100.0
 
         if not detected:
             self.target_occluded = False
+            self.show_debug_frame(frame, debug, target_color, False, distance_m)
             return DetectionResult(detected=False, distance_m=distance_m)
 
         self.target_x = x
@@ -257,6 +261,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.target_area = area
         self.target_occluded = occluded
         self.last_seen_time = time.time()
+        self.show_debug_frame(frame, debug, target_color, True, distance_m)
 
         confidence = clamp(area / max(self.target_area_min, 0.001), 0.0, 1.0)
         bearing_deg = x * 45.0
@@ -288,7 +293,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
 
     def detect_target(self, frame, target_color: str):
         if target_color not in COLOR_RANGES:
-            return False, 0.0, 0.0, 0.0, False
+            return False, 0.0, 0.0, 0.0, False, {"mask": None}
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
@@ -310,18 +315,18 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours = contours[0] if len(contours) == 2 else contours[1]
         if len(contours) == 0:
-            return False, 0.0, 0.0, 0.0, False
+            return False, 0.0, 0.0, 0.0, False, {"mask": mask}
 
         contour = max(contours, key=cv2.contourArea)
         area = cv2.contourArea(contour)
         height, width = frame.shape[:2]
         relative_area = area / float(width * height)
         if relative_area < 0.002:
-            return False, 0.0, 0.0, 0.0, False
+            return False, 0.0, 0.0, 0.0, False, {"mask": mask}
 
         moments = cv2.moments(contour)
         if moments["m00"] == 0:
-            return False, 0.0, 0.0, 0.0, False
+            return False, 0.0, 0.0, 0.0, False, {"mask": mask}
 
         center_x = int(moments["m10"] / moments["m00"])
         center_y = int(moments["m01"] / moments["m00"])
@@ -330,7 +335,54 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
 
         x, y, w, h = cv2.boundingRect(contour)
         occluded, _ = self.detect_target_occlusion(frame, mask, x, y, w, h, relative_area)
-        return True, target_x, target_y, relative_area, occluded
+        debug = {
+            "mask": mask,
+            "box": (x, y, w, h),
+            "center": (center_x, center_y),
+        }
+        return True, target_x, target_y, relative_area, occluded, debug
+
+    def show_debug_frame(self, frame, debug, target_color: str, detected: bool, distance_m) -> None:
+        if not self.show_video:
+            return
+
+        annotated = frame.copy()
+        height, width = annotated.shape[:2]
+        cv2.line(annotated, (width // 2, 0), (width // 2, height), (255, 255, 255), 1)
+        cv2.line(annotated, (0, height // 2), (width, height // 2), (255, 255, 255), 1)
+
+        if detected and debug.get("box") is not None:
+            x, y, w, h = debug["box"]
+            center_x, center_y = debug["center"]
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.circle(annotated, (center_x, center_y), 4, (255, 0, 0), -1)
+
+        status = (
+            f"color={target_color} detected={detected} "
+            f"x={self.target_x:.2f} y={self.target_y:.2f} area={self.target_area:.3f} "
+            f"pan={self.pan_angle} tilt={self.tilt_angle} "
+            f"dist={'--' if distance_m is None else round(distance_m, 2)} "
+            f"{self.action_status}"
+        )
+        cv2.putText(
+            annotated,
+            status,
+            (10, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+        mask = debug.get("mask")
+        if mask is not None:
+            mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            mask_bgr = cv2.resize(mask_bgr, (width, height))
+            annotated = np.hstack((annotated, mask_bgr))
+
+        cv2.imshow(self.video_window_name, annotated)
+        cv2.waitKey(1)
 
     def detect_target_occlusion(self, frame, target_mask, x, y, w, h, relative_area):
         if relative_area > self.occluded_target_area_max:
@@ -459,15 +511,12 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         elif self.move_only_when_centered and not target_centered:
             self.action_status = "wait-center"
             self.stop_motors()
-        elif distance_m is not None and distance_m > goal_m:
-            self.action_status = "forward"
-            self.send_move(MOVE_FORWARD_Y, turn)
-        elif distance_m is None and self.target_area < self.target_area_min:
-            self.action_status = "forward-by-area"
-            self.send_move(MOVE_FORWARD_Y, turn)
         elif self.target_area > self.target_area_max:
             self.action_status = "too-close-back"
             self.send_move(MOVE_BACKWARD_Y, 0)
+        elif self.target_area < self.target_area_min:
+            self.action_status = "forward"
+            self.send_move(MOVE_FORWARD_Y, turn)
         elif turn != 0:
             self.action_status = "rotate"
             self.send_move(0, turn)
@@ -477,12 +526,16 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
 
     def reset_camera(self):
         self.pan_angle = 0
-        self.tilt_angle = 0
         self.send_camera(force=True)
 
     def close(self):
         self.stop_motors()
         self.reset_camera()
+        if self.show_video:
+            try:
+                cv2.destroyWindow(self.video_window_name)
+            except cv2.error:
+                pass
         if self.camera is not None:
             try:
                 self.camera.close()
