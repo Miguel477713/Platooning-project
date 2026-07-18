@@ -1,15 +1,20 @@
 
-| Topic                           | Publisher        | Subscriber         | Retain? |
-| -------------------------       | ---------------- | ------------------ | ------- |
-| `platoon/assignment/Hexapod1`   | Leader/laptop    | Hexapod1           | Yes     |
-| `platoon/assignment/Hexapod2`   | Leader/laptop    | Hexapod2           | Yes     |
-| `platoon/assignment/all`        | Leader/laptop    | Hexapod1, Hexapod2 | Maybe   |
-| `platoon/command/#`             | Leader/laptop    | Hexapod1, Hexapod2 | No      |
-| `platoon/emergency`             | Any robot/laptop | All robots         | No      |
-| `platoon/robot/Cart/status`     | Cart             | Monitor/laptop     | No      |
-| `platoon/robot/Hexapod1/status` | Hexapod1         | Monitor/laptop     | No      |
-| `platoon/robot/Hexapod2/status` | Hexapod2         | Monitor/laptop     | No      |
-| `platoon/robot/Cart/event`      | Cart             | All robots/monitor | No      |
-| `platoon/robot/Hexapod1/event`  | Hexapod1         | Hexapod2/monitor   | No      |
-| `platoon/robot/Hexapod2/event`  | Hexapod2         | Monitor            | No      |
-| `platoon/state`                 | Leader/laptop    | All robots         | Yes     |
+| Topic                                 | Publisher        | Subscriber         | Retain? |
+| -------------------------             | ---------------- | ------------------ | ------- |
+| `platoon/assignment/Hexapod1`         | Leader/laptop    | Hexapod1           | Yes     |
+| `platoon/assignment/Hexapod2`         | Leader/laptop    | Hexapod2           | Yes     |
+| `platoon/assignment/all`              | Leader/laptop    | Hexapod1, Hexapod2 | Maybe   |
+| `platoon/command/#`                   | Leader/laptop    | Hexapod1, Hexapod2 | No      |
+| `platoon/emergency`                   | Any robot/laptop | All robots         | No      |
+| `platoon/robot/Cart/status`           | Cart             | Monitor/laptop     | No      |
+| `platoon/robot/Hexapod1/status`       | Hexapod1         | Monitor/laptop     | No      |
+| `platoon/robot/Hexapod2/status`       | Hexapod2         | Monitor/laptop     | No      |
+| `platoon/robot/Cart/event`            | Cart             | All robots/monitor | No      |
+| `platoon/robot/Hexapod1/event`        | Hexapod1         | Hexapod2/monitor   | No      |
+| `platoon/robot/Hexapod2/event`        | Hexapod2         | Monitor            | No      |
+| `platoon/robot/Superintendent/event`  | DistanceDetection| All robots         | No      |
+| `platoon/state`                       | Leader/laptop    | All robots         | Yes     |
+
+DistanceDetection publishes `GLOBAL_SEARCH_MARKER_DISTANCE` continuously as
+`Superintendent`. Followers consume matching marker pairs only while they are in
+`GLOBAL_SEARCH`.

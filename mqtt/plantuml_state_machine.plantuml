@@ -10,9 +10,21 @@ WAIT_FOR_ASSIGNMENT : wait for MQTT assignment
 WAIT_FOR_ASSIGNMENT --> GLOBAL_SEARCH : receive ASSIGNMENT\nset initial target/color
 
 GLOBAL_SEARCH : global_detect(current_target_color)
-GLOBAL_SEARCH : if not detected -> global_search_motion()
+GLOBAL_SEARCH : if not detected and Superintendent far -> global_search_guided_motion()
+GLOBAL_SEARCH : if not detected and no Superintendent -> global_search_motion()
 GLOBAL_SEARCH --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
+GLOBAL_SEARCH --> GLOBAL_VISUAL_ACQUIRE : target not detected\nand Superintendent distance <= 0.80m\npublish SUPERINTENDENT_ACQUIRE_RANGE_REACHED
 GLOBAL_SEARCH --> GLOBAL_SEARCH : target not detected
+
+GLOBAL_VISUAL_ACQUIRE : global_detect(current_target_color)
+GLOBAL_VISUAL_ACQUIRE : pan camera left/right
+GLOBAL_VISUAL_ACQUIRE : small Superintendent-guided creep moves
+GLOBAL_VISUAL_ACQUIRE : stop between creep moves to settle image
+GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
+GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : Superintendent stale
+GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : Superintendent distance > 1.10m\npublish SUPERINTENDENT_ACQUIRE_RANGE_EXITED
+GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : timeout after 8s\npublish GLOBAL_VISUAL_ACQUIRE_TIMEOUT
+GLOBAL_VISUAL_ACQUIRE --> GLOBAL_VISUAL_ACQUIRE : target not detected\ncontinue acquire
 
 GLOBAL_APPROACH : global_detect(current_target_color)
 GLOBAL_APPROACH : approach current target
@@ -45,6 +57,7 @@ EMERGENCY_STOP --> WAIT_FOR_ASSIGNMENT : RESET
 
 WAIT_FOR_ASSIGNMENT --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
 GLOBAL_SEARCH --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
+GLOBAL_VISUAL_ACQUIRE --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
 GLOBAL_APPROACH --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
 WAIT_FOR_FINAL_TARGET_READY --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
 LOCAL_LOCK --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
