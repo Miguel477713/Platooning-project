@@ -110,10 +110,27 @@ def main() -> None:
         help="Dark-pixel ratio that marks a small detection as occluded.",
     )
     parser.add_argument("--no-wake", action="store_true", help="Do not stand up on startup.")
+    parser.add_argument(
+        "--superintendent-source-marker",
+        help="Overhead marker attached to this robot, for example green.",
+    )
+    parser.add_argument(
+        "--superintendent-target-marker",
+        help="Overhead target marker this robot should move toward during GLOBAL_SEARCH.",
+    )
     args = parser.parse_args()
 
     if args.no_mqtt and args.target_color is None:
         parser.error("--no-mqtt requires --target-color so the state machine has an assignment.")
+    superintendent_args = [
+        args.superintendent_source_marker,
+        args.superintendent_target_marker,
+    ]
+    if any(superintendent_args) and not all(superintendent_args):
+        parser.error(
+            "--superintendent-source-marker and --superintendent-target-marker "
+            "must be used together."
+        )
 
     if args.mock:
         implementation = FollowerRobotImplementation()
@@ -137,7 +154,12 @@ def main() -> None:
             occlusion_dark_ratio=args.occlusion_dark_ratio,
             show_video=args.show_video,
         )
-    robot = FollowerStateMachine(robot_id=args.robot_id, implementation=implementation)
+    robot = FollowerStateMachine(
+        robot_id=args.robot_id,
+        implementation=implementation,
+        superintendent_source_marker=args.superintendent_source_marker,
+        superintendent_target_marker=args.superintendent_target_marker,
+    )
     handler = FollowerMqttHandler(robot)
 
     transport = None
@@ -188,6 +210,13 @@ def main() -> None:
         print("[INFO] local assignment:", args.target_id, args.target_color)
     if args.show_video:
         print("[INFO] video: showing direct camera debug window")
+    if args.superintendent_source_marker is not None:
+        print(
+            "[INFO] superintendent guidance:",
+            args.superintendent_source_marker,
+            "to",
+            args.superintendent_target_marker,
+        )
 
     try:
         while True:

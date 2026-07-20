@@ -7,7 +7,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from common.models import DetectionResult
+from common.models import DetectionResult, SuperintendentMeasurement
 
 
 CENTER_DEADZONE_X = 0.10
@@ -28,6 +28,16 @@ SPEED_MIN = 2
 SPEED_MAX = 10
 MOVE_FORWARD_Y = 12
 MOVE_BACKWARD_Y = -10
+OVERHEAD_MOVE_GAIN = 18
+OVERHEAD_MAX_STEP = 14
+OVERHEAD_AXIS_DEADZONE_M = 0.08
+OVERHEAD_CLOSE_DISTANCE_M = 0.40
+VISUAL_ACQUIRE_MOVE_GAIN = 8
+VISUAL_ACQUIRE_MAX_STEP = 5
+VISUAL_ACQUIRE_MOVE_INTERVAL = 0.35
+VISUAL_ACQUIRE_PAN_STEP = 2
+VISUAL_ACQUIRE_ROTATE_PAN_THRESHOLD = 26
+VISUAL_ACQUIRE_ROTATE_STEP = 3
 
 PAN_MAX = 35
 TILT_MAX = 35
@@ -100,8 +110,22 @@ class FollowerRobotImplementation:
     def stop_motors(self) -> None:
         print("[MOTOR] stop")
 
-    def global_search_motion(self) -> None:
-        print("[MOTOR] global search motion")
+    def global_search_stop(self) -> None:
+        print("[MOTOR] global search stop")
+
+    def global_search_guided_motion(self, measurement: SuperintendentMeasurement) -> None:
+        print(
+            "[MOTOR] global search guided motion "
+            f"source={measurement.source_marker}, target={measurement.target_marker}, "
+            f"distance={measurement.distance_m}, dx={measurement.dx_m}, dy={measurement.dy_m}"
+        )
+
+    def global_visual_acquire_motion(self, measurement: SuperintendentMeasurement) -> None:
+        print(
+            "[MOTOR] global visual acquire motion "
+            f"source={measurement.source_marker}, target={measurement.target_marker}, "
+            f"distance={measurement.distance_m}, dx={measurement.dx_m}, dy={measurement.dy_m}"
+        )
 
     def global_approach_motion(self, *, target_id: str, distance_m: float, goal_m: float) -> None:
         print(
@@ -125,10 +149,6 @@ class FollowerRobotImplementation:
 
 class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
     """Freenove hardware implementation without the Freenove TCP server.
-
-    This ports the usable pieces of Code/Client/FollowObjectProcedural.py into
-    the state-machine implementation layer. It talks directly to the Freenove
-    camera, ultrasonic sensor, servo controller, and gait Control class.
     """
 
     def __init__(
@@ -187,6 +207,8 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.last_camera_x = None
         self.last_camera_y = None
         self.last_frame_time = 0.0
+        self.visual_acquire_pan_direction = 1
+        self.last_visual_acquire_move = 0.0
 
         self.server_dir = self._prepare_freenove_imports()
         self.control = None
@@ -407,9 +429,133 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
     def stop_motors(self) -> None:
         self.send_move(0, 0)
 
-    def global_search_motion(self) -> None:
+    def global_search_stop(self) -> None:
         self.action_status = "global-search-idle"
         self.stop_motors()
+
+    def global_search_guided_motion(self, measurement: SuperintendentMeasurement) -> None:
+        if self.camera_only:
+            self.action_status = "overhead-camera-only"
+            self.stop_motors()
+            return
+
+        distance_m = measurement.distance_m
+        dx_m = measurement.dx_m
+        dy_m = measurement.dy_m
+
+        if distance_m is None or dx_m is None or dy_m is None:
+            self.action_status = "overhead-missing"
+            self.stop_motors()
+            return
+
+        distance_cm = self.request_ultrasonic_distance()
+        if distance_cm is not None and distance_cm < OBSTACLE_MIN_CM:
+            self.action_status = "overhead-obstacle-back"
+            self.send_move_xy(0, MOVE_BACKWARD_Y, 0)
+            return
+
+        if distance_m <= OVERHEAD_CLOSE_DISTANCE_M:
+            self.action_status = "overhead-close-hold"
+            self.stop_motors()
+            return
+
+        x = 0
+        y = 0
+        if abs(dx_m) > OVERHEAD_AXIS_DEADZONE_M:
+            x = clamp(int(round(dx_m * OVERHEAD_MOVE_GAIN)), -OVERHEAD_MAX_STEP, OVERHEAD_MAX_STEP)
+        if abs(dy_m) > OVERHEAD_AXIS_DEADZONE_M:
+            y = clamp(int(round(dy_m * OVERHEAD_MOVE_GAIN)), -OVERHEAD_MAX_STEP, OVERHEAD_MAX_STEP)
+
+        if x == 0 and y == 0:
+            self.action_status = "overhead-deadzone"
+            self.stop_motors()
+            return
+
+        self.action_status = "overhead-guided"
+        self.send_move_xy(x, y, 0)
+
+    def global_visual_acquire_motion(self, measurement: SuperintendentMeasurement) -> None:
+        if self.camera_only:
+            self.action_status = "visual-acquire-camera-only"
+            self.visual_acquire_camera_sweep()
+            self.stop_motors()
+            return
+
+        self.visual_acquire_camera_sweep()
+
+        distance_m = measurement.distance_m
+        dx_m = measurement.dx_m
+        dy_m = measurement.dy_m
+
+        if distance_m is None or dx_m is None or dy_m is None:
+            self.action_status = "visual-acquire-missing"
+            self.stop_motors()
+            return
+
+        distance_cm = self.request_ultrasonic_distance()
+        if distance_cm is not None and distance_cm < OBSTACLE_MIN_CM:
+            self.action_status = "visual-acquire-obstacle-back"
+            self.send_move_xy(0, MOVE_BACKWARD_Y, 0)
+            return
+
+        now = time.time()
+        if now - self.last_visual_acquire_move < VISUAL_ACQUIRE_MOVE_INTERVAL:
+            self.action_status = "visual-acquire-settle"
+            self.stop_motors()
+            return
+
+        turn = self.visual_acquire_turn_from_pan()
+        if turn != 0:
+            self.last_visual_acquire_move = now
+            self.action_status = "visual-acquire-rotate"
+            self.send_move_xy(0, 0, turn)
+            return
+
+        x = 0
+        y = 0
+        if abs(dx_m) > OVERHEAD_AXIS_DEADZONE_M:
+            x = clamp(
+                int(round(dx_m * VISUAL_ACQUIRE_MOVE_GAIN)),
+                -VISUAL_ACQUIRE_MAX_STEP,
+                VISUAL_ACQUIRE_MAX_STEP,
+            )
+        if distance_m > OVERHEAD_CLOSE_DISTANCE_M and abs(dy_m) > OVERHEAD_AXIS_DEADZONE_M:
+            y = clamp(
+                int(round(dy_m * VISUAL_ACQUIRE_MOVE_GAIN)),
+                -VISUAL_ACQUIRE_MAX_STEP,
+                VISUAL_ACQUIRE_MAX_STEP,
+            )
+
+        self.last_visual_acquire_move = now
+        if x == 0 and y == 0:
+            self.action_status = "visual-acquire-hold"
+            self.stop_motors()
+            return
+
+        self.action_status = "visual-acquire-creep"
+        self.send_move_xy(x, y, 0)
+
+    def visual_acquire_camera_sweep(self):
+        self.pan_angle += self.visual_acquire_pan_direction * VISUAL_ACQUIRE_PAN_STEP
+        if self.pan_angle > self.pan_max:
+            self.pan_angle = self.pan_max
+            self.visual_acquire_pan_direction = -1
+        elif self.pan_angle < -self.pan_max:
+            self.pan_angle = -self.pan_max
+            self.visual_acquire_pan_direction = 1
+
+        self.send_camera()
+
+    def visual_acquire_turn_from_pan(self):
+        if not self.enable_turning:
+            return 0
+
+        pan_threshold = min(VISUAL_ACQUIRE_ROTATE_PAN_THRESHOLD, self.pan_max)
+        if abs(self.pan_angle) < pan_threshold:
+            return 0
+
+        turn = -VISUAL_ACQUIRE_ROTATE_STEP if self.pan_angle > 0 else VISUAL_ACQUIRE_ROTATE_STEP
+        return turn
 
     def global_approach_motion(self, *, target_id: str, distance_m: float, goal_m: float) -> None:
         self.center_camera()
@@ -439,11 +585,15 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.last_camera_y = int(servo_y)
 
     def send_move(self, y, angle=0):
+        self.send_move_xy(0, y, angle)
+
+    def send_move_xy(self, x, y, angle=0):
         if self.control is None:
             return
+        x = clamp(int(x), -35, 35)
         y = clamp(int(y), -35, 35)
         angle = clamp(int(angle), -10, 10)
-        self.control.command_queue = ["CMD_MOVE", "1", "0", str(y), str(self.speed), str(angle)]
+        self.control.command_queue = ["CMD_MOVE", "1", str(x), str(y), str(self.speed), str(angle)]
         self.control.timeout = time.time()
 
     def stand_up(self):

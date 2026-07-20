@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 class State(Enum):
     WAIT_FOR_ASSIGNMENT = auto()
     GLOBAL_SEARCH = auto()
+    GLOBAL_VISUAL_ACQUIRE = auto()
     GLOBAL_APPROACH = auto()
     WAIT_FOR_FINAL_TARGET_READY = auto()
     LOCAL_LOCK = auto()
@@ -45,6 +46,19 @@ class DetectionResult:
     target_y: Optional[float] = None
     target_area: Optional[float] = None
     occluded: bool = False
+
+
+@dataclass
+class SuperintendentMeasurement:
+    source_marker: str
+    target_marker: str
+    distance_m: Optional[float]
+    raw_distance_m: Optional[float]
+    dx_m: Optional[float]
+    dy_m: Optional[float]
+    timestamp: float
+    calibrated: bool = False
+    filtered: bool = False
 
 
 @dataclass

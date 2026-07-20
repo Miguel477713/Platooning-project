@@ -4,6 +4,9 @@ import math
 import threading
 import argparse
 import json
+import sys
+from collections import deque
+from statistics import median
 from pathlib import Path
 
 # Set before importing/using VideoCapture where possible.
@@ -17,6 +20,12 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, request
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from mqtt.distance_publisher import DistanceMqttPublisher
+
 RTSP_URL = os.getenv(
     "RTSP_URL",
     "rtsp://oliversina135:12345678@10.0.7.12:554/stream1"
@@ -27,6 +36,10 @@ TARGET_FPS = float(os.getenv("TARGET_FPS", "30"))
 PROCESS_WIDTH = int(os.getenv("PROCESS_WIDTH", "0"))  # 0 disables resize
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "95"))
 DEFAULT_CALIBRATION_DISTANCE = 100.0
+MQTT_ROBOT_ID = "Superintendent"
+FILTER_WINDOW = int(os.getenv("FILTER_WINDOW", "5"))
+FILTER_ALPHA = float(os.getenv("FILTER_ALPHA", "0.35"))
+FILTER_MAX_JUMP_M = float(os.getenv("FILTER_MAX_JUMP_M", "0.50"))
 CALIBRATION_FILE = Path(
     os.getenv(
         "CALIBRATION_FILE",
@@ -39,6 +52,9 @@ calibration = None
 clicked_points = []
 calibration_lock = threading.Lock()
 calibration_mode = False
+distance_filters = {}
+distance_filters_lock = threading.Lock()
+display_marker_pairs = None
 
 COLORS = {
     # HSV ranges tuned from rosa.png (#e8428c) and verde.png (#679341).
@@ -53,6 +69,66 @@ COLORS = {
 
 DRAW_COLOR = (255, 255, 255)
 CALIBRATION_COLOR = (255, 0, 0)
+UNIT_TO_METERS = {
+    "m": 1.0,
+    "meter": 1.0,
+    "meters": 1.0,
+    "cm": 0.01,
+    "centimeter": 0.01,
+    "centimeters": 0.01,
+    "mm": 0.001,
+    "millimeter": 0.001,
+    "millimeters": 0.001,
+}
+
+
+def DistanceToMeters(distance, unit):
+    if distance is None or unit is None:
+        return None
+
+    try:
+        distance_value = float(distance)
+    except (TypeError, ValueError):
+        return None
+
+    scale = UNIT_TO_METERS.get(str(unit).strip().lower())
+    if scale is None:
+        return None
+
+    return distance_value * scale
+
+
+def DistanceFromMeters(distance_m, unit):
+    if distance_m is None or unit is None:
+        return None
+
+    scale = UNIT_TO_METERS.get(str(unit).strip().lower())
+    if scale is None:
+        return None
+
+    return distance_m / scale
+
+
+def ParseMarkerPair(value):
+    separator = ":" if ":" in value else ","
+    parts = [part.strip() for part in value.split(separator)]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise argparse.ArgumentTypeError(
+            "Marker pairs must use the form source:target, for example green:pink."
+        )
+    return parts[0], parts[1]
+
+
+def NormalizeMarkerPairs(pairs):
+    if pairs is None:
+        return None
+    return {frozenset(pair) for pair in pairs}
+
+
+def MarkerPairIsEnabled(name_a, name_b, enabled_pairs):
+    if enabled_pairs is None:
+        return True
+    return frozenset((name_a, name_b)) in enabled_pairs
 
 
 class HomographyCalibration:
@@ -93,6 +169,11 @@ class HomographyCalibration:
         image_points = np.float32([[point_a], [point_b]])
         world_points = cv2.perspectiveTransform(image_points, transform).reshape(2, 2)
         return float(np.linalg.norm(world_points[1] - world_points[0]))
+
+    def ProjectPoint(self, transform, point):
+        image_point = np.float32([[point]])
+        world_point = cv2.perspectiveTransform(image_point, transform).reshape(2)
+        return float(world_point[0]), float(world_point[1])
 
     def TryInitialize(self, points):
         if self.transform is not None or len(points) != 4:
@@ -344,6 +425,24 @@ def FindBlobCenter(hsv, ranges):
     return centers[0] if centers else None
 
 
+def DetectMarkerPositions(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    positions = {}
+
+    for color_name, ranges in COLORS.items():
+        result = FindBlobCenter(hsv, ranges)
+
+        if result is not None:
+            cx, cy, area = result
+            positions[color_name] = {
+                "x": cx,
+                "y": cy,
+                "area": area,
+            }
+
+    return positions
+
+
 def DistancePixels(p1, p2):
     dx = p2[0] - p1[0]
     dy = p2[1] - p1[1]
@@ -351,9 +450,225 @@ def DistancePixels(p1, p2):
     return d, dx, dy
 
 
+def MeasurementKey(name_a, name_b):
+    return f"{name_a}-{name_b}"
+
+
+def MarkerPoint(position):
+    return (int(position["x"]), int(position["y"]))
+
+
+class DistanceStabilizer:
+    def __init__(self, window_size, alpha, max_jump_m):
+        self.samples = deque(maxlen=max(1, window_size))
+        self.alpha = max(0.0, min(1.0, alpha))
+        self.max_jump_m = max_jump_m
+        self.filtered_m = None
+
+    def Update(self, raw_distance_m):
+        if raw_distance_m is None:
+            return self.filtered_m
+
+        if (
+            self.filtered_m is not None
+            and self.max_jump_m > 0.0
+            and abs(raw_distance_m - self.filtered_m) > self.max_jump_m
+        ):
+            return self.filtered_m
+
+        self.samples.append(raw_distance_m)
+        median_distance_m = median(self.samples)
+
+        if self.filtered_m is None:
+            self.filtered_m = median_distance_m
+        else:
+            self.filtered_m = (
+                self.alpha * median_distance_m
+                + (1.0 - self.alpha) * self.filtered_m
+            )
+
+        return self.filtered_m
+
+
+def StabilizeDistance(key, raw_distance_m):
+    with distance_filters_lock:
+        stabilizer = distance_filters.get(key)
+        if stabilizer is None:
+            stabilizer = DistanceStabilizer(
+                FILTER_WINDOW,
+                FILTER_ALPHA,
+                FILTER_MAX_JUMP_M,
+            )
+            distance_filters[key] = stabilizer
+
+        return stabilizer.Update(raw_distance_m)
+
+
+def BuildDistanceMeasurements(positions, active_calibration):
+    measurements = {}
+    names = sorted(positions.keys())
+    transform = None
+    unit = None
+
+    if active_calibration is not None:
+        transform, _ = active_calibration.GetCachedTransform()
+        unit = active_calibration.unit
+
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            name_a = names[i]
+            name_b = names[j]
+            p1 = MarkerPoint(positions[name_a])
+            p2 = MarkerPoint(positions[name_b])
+            pixel_distance, dx_pixels, dy_pixels = DistancePixels(p1, p2)
+            raw_distance = None
+            raw_distance_m = None
+            distance_m = None
+            distance = None
+
+            if transform is not None:
+                raw_distance = active_calibration.Distance(transform, p1, p2)
+                raw_distance_m = DistanceToMeters(raw_distance, unit)
+                world_p1 = active_calibration.ProjectPoint(transform, p1)
+                world_p2 = active_calibration.ProjectPoint(transform, p2)
+                dx_world = world_p2[0] - world_p1[0]
+                dy_world = world_p2[1] - world_p1[1]
+                dx_m = DistanceToMeters(dx_world, unit)
+                dy_m = DistanceToMeters(dy_world, unit)
+                distance_m = StabilizeDistance(
+                    MeasurementKey(name_a, name_b),
+                    raw_distance_m,
+                )
+                distance = DistanceFromMeters(distance_m, unit)
+            else:
+                dx_m = None
+                dy_m = None
+
+            payload = {
+                "from": name_a,
+                "to": name_b,
+                "pixel_distance": pixel_distance,
+                "dx_pixels": dx_pixels,
+                "dy_pixels": dy_pixels,
+                "dx_m": dx_m,
+                "dy_m": dy_m,
+                "unit": unit,
+                "distance": distance,
+                "distance_m": distance_m,
+                "raw_distance": raw_distance,
+                "raw_distance_m": raw_distance_m,
+                "filtered": distance_m is not None,
+            }
+
+            measurements[MeasurementKey(name_a, name_b)] = payload
+            reverse_payload = dict(payload)
+            reverse_payload["from"] = name_b
+            reverse_payload["to"] = name_a
+            reverse_payload["dx_pixels"] = -dx_pixels
+            reverse_payload["dy_pixels"] = -dy_pixels
+            reverse_payload["dx_m"] = None if dx_m is None else -dx_m
+            reverse_payload["dy_m"] = None if dy_m is None else -dy_m
+            reverse_payload["distance_m"] = StabilizeDistance(
+                MeasurementKey(name_b, name_a),
+                raw_distance_m,
+            )
+            reverse_payload["distance"] = DistanceFromMeters(
+                reverse_payload["distance_m"],
+                unit,
+            )
+            measurements[MeasurementKey(name_b, name_a)] = reverse_payload
+
+    return measurements
+
+
+def GetMeasurementSnapshot():
+    frame = grabber.GetLatest()
+    if frame is None:
+        return None
+
+    frame = ResizeForProcessing(frame)
+    positions = DetectMarkerPositions(frame)
+
+    with calibration_lock:
+        active_calibration = calibration
+
+    measurements = BuildDistanceMeasurements(positions, active_calibration)
+    return {
+        "timestamp": time.time(),
+        "calibrated": active_calibration is not None
+        and active_calibration.transform is not None,
+        "unit": active_calibration.unit if active_calibration is not None else None,
+        "positions": positions,
+        "distances": measurements,
+    }
+
+
+def BuildDistanceEventPayload(robot_id, marker_a, marker_b):
+    snapshot = GetMeasurementSnapshot()
+    now = time.time()
+
+    if snapshot is None:
+        return {
+            "type": "EVENT",
+            "robot_id": robot_id,
+            "event": "GLOBAL_SEARCH_MARKER_DISTANCE_UNAVAILABLE",
+            "state": "MEASURING",
+            "timestamp": now,
+            "source_marker": marker_a,
+            "target_marker": marker_b,
+            "error": "No frame is available yet.",
+        }
+
+    measurement = snapshot["distances"].get(MeasurementKey(marker_a, marker_b))
+    if measurement is None:
+        return {
+            "type": "EVENT",
+            "robot_id": robot_id,
+            "event": "GLOBAL_SEARCH_MARKER_DISTANCE_UNAVAILABLE",
+            "state": "MEASURING",
+            "timestamp": now,
+            "source_marker": marker_a,
+            "target_marker": marker_b,
+            "available_markers": sorted(snapshot["positions"].keys()),
+            "error": "Could not detect both requested markers.",
+        }
+
+    return {
+        "type": "EVENT",
+        "robot_id": robot_id,
+        "event": "GLOBAL_SEARCH_MARKER_DISTANCE",
+        "state": "MEASURING",
+        "timestamp": now,
+        "source_marker": marker_a,
+        "target_marker": marker_b,
+        "distance": measurement.get("distance"),
+        "raw_distance": measurement.get("raw_distance"),
+        "unit": measurement.get("unit"),
+        "distance_m": measurement.get("distance_m"),
+        "raw_distance_m": measurement.get("raw_distance_m"),
+        "pixel_distance": measurement.get("pixel_distance"),
+        "dx_pixels": measurement.get("dx_pixels"),
+        "dy_pixels": measurement.get("dy_pixels"),
+        "dx_m": measurement.get("dx_m"),
+        "dy_m": measurement.get("dy_m"),
+        "calibrated": snapshot["calibrated"],
+        "filtered": measurement.get("filtered", False),
+        "filter_window": FILTER_WINDOW,
+        "filter_alpha": FILTER_ALPHA,
+        "filter_max_jump_m": FILTER_MAX_JUMP_M,
+        "measurement_timestamp": snapshot["timestamp"],
+    }
+
+
+def BuildDistanceEventPayloads(robot_id, marker_pairs):
+    return [
+        BuildDistanceEventPayload(robot_id, marker_a, marker_b)
+        for marker_a, marker_b in marker_pairs
+    ]
+
+
 def ProcessFrame(frame):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    positions = {}
+    detected_positions = DetectMarkerPositions(frame)
 
     with calibration_lock:
         active_calibration = calibration
@@ -432,48 +747,53 @@ def ProcessFrame(frame):
         2,
     )
 
-    for color_name, ranges in COLORS.items():
-        result = FindBlobCenter(hsv, ranges)
+    for color_name, position in detected_positions.items():
+        cx = int(position["x"])
+        cy = int(position["y"])
+        area = float(position["area"])
 
-        if result is not None:
-            cx, cy, area = result
-            positions[color_name] = (cx, cy)
+        cv2.circle(frame, (cx, cy), 12, DRAW_COLOR, 2)
+        cv2.putText(
+            frame,
+            f"{color_name}: ({cx},{cy}) area={int(area)}",
+            (cx + 15, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            DRAW_COLOR,
+            2,
+        )
 
-            cv2.circle(frame, (cx, cy), 12, DRAW_COLOR, 2)
-            cv2.putText(
-                frame,
-                f"{color_name}: ({cx},{cy}) area={int(area)}",
-                (cx + 15, cy),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                DRAW_COLOR,
-                2,
-            )
-
-    names = sorted(positions.keys())
+    measurements = BuildDistanceMeasurements(detected_positions, active_calibration)
+    names = sorted(detected_positions.keys())
     y_text = 60
 
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             name_a = names[i]
             name_b = names[j]
-            p1 = positions[name_a]
-            p2 = positions[name_b]
-            cv2.line(frame, p1, p2, DRAW_COLOR, 2)
+            p1 = MarkerPoint(detected_positions[name_a])
+            p2 = MarkerPoint(detected_positions[name_b])
+            marker_pair_enabled = MarkerPairIsEnabled(
+                name_a,
+                name_b,
+                display_marker_pairs,
+            )
+            if not marker_pair_enabled:
+                continue
 
+            cv2.line(frame, p1, p2, DRAW_COLOR, 2)
             mid_x = int((p1[0] + p2[0]) / 2)
             mid_y = int((p1[1] + p2[1]) / 2)
-            is_green_pink_pair = {name_a, name_b} == {"green", "pink"}
 
-            if active_calibration is not None and transform is not None and is_green_pink_pair:
-                real_distance = active_calibration.Distance(transform, p1, p2)
+            measurement = measurements.get(MeasurementKey(name_a, name_b))
+            if measurement and measurement["distance"] is not None:
                 distance_label = (
-                    f"{name_a}-{name_b}: {real_distance:.2f} {active_calibration.unit}"
+                    f"{name_a}-{name_b}: "
+                    f"raw {measurement['raw_distance']:.2f} {measurement['unit']} | "
+                    f"stable {measurement['distance']:.2f} {measurement['unit']}"
                 )
-            elif is_green_pink_pair:
-                distance_label = f"{name_a}-{name_b}: calibration needed"
             else:
-                continue
+                distance_label = f"{name_a}-{name_b}: calibration needed"
 
             cv2.putText(
                 frame,
@@ -632,7 +952,7 @@ def index():
     <body>
         <main>
             <div id="toolbar">
-            <h2>Pink-Green Distance</h2>
+            <h2>Pair Distances</h2>
             <p id="status">Loading calibration...</p>
             <button id="fullscreen" type="button">Fullscreen video</button>
             <div id="controls">
@@ -726,16 +1046,108 @@ def video():
     )
 
 
+@app.get("/measurements")
+def measurements():
+    snapshot = GetMeasurementSnapshot()
+    if snapshot is None:
+        return jsonify(error="No frame is available yet."), 503
+    return jsonify(snapshot)
+
+
+@app.get("/distance")
+def distance():
+    marker_a = request.args.get("from", "").strip()
+    marker_b = request.args.get("to", "").strip()
+
+    if not marker_a or not marker_b:
+        return jsonify(error="Query parameters 'from' and 'to' are required."), 400
+
+    snapshot = GetMeasurementSnapshot()
+    if snapshot is None:
+        return jsonify(error="No frame is available yet."), 503
+
+    measurement = snapshot["distances"].get(MeasurementKey(marker_a, marker_b))
+    if measurement is None:
+        return jsonify(
+            error="Could not detect both requested markers.",
+            available_markers=sorted(snapshot["positions"].keys()),
+        ), 404
+
+    payload = dict(measurement)
+    payload["timestamp"] = snapshot["timestamp"]
+    payload["calibrated"] = snapshot["calibrated"]
+    return jsonify(payload)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Measure pink-green distance using a saved click calibration."
+        description="Measure pair distances using a saved click calibration."
     )
     parser.add_argument(
         "--calibrate",
         action="store_true",
         help="Select four new corners and enter their measured side lengths.",
     )
+    parser.add_argument(
+        "--mqtt-broker",
+        help="MQTT broker IP/host. Enables distance publication when set.",
+    )
+    parser.add_argument(
+        "--mqtt-port",
+        type=int,
+        default=1883,
+        help="MQTT broker port.",
+    )
+    parser.add_argument(
+        "--mqtt-marker-pair",
+        action="append",
+        type=ParseMarkerPair,
+        help="Marker pair to publish, for example green:pink. Can be used more than once.",
+    )
+    parser.add_argument(
+        "--mqtt-period",
+        type=float,
+        default=0.5,
+        help="Seconds between MQTT distance events.",
+    )
+    parser.add_argument(
+        "--filter-window",
+        type=int,
+        default=FILTER_WINDOW,
+        help="Rolling median sample count for distance stabilization.",
+    )
+    parser.add_argument(
+        "--filter-alpha",
+        type=float,
+        default=FILTER_ALPHA,
+        help="EMA alpha for distance stabilization, from 0.0 to 1.0.",
+    )
+    parser.add_argument(
+        "--filter-max-jump-m",
+        type=float,
+        default=FILTER_MAX_JUMP_M,
+        help="Ignore single-sample jumps larger than this many meters. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--display-pair",
+        action="append",
+        type=ParseMarkerPair,
+        help="Marker pair to draw in the video, for example green:pink. Can be used more than once. Defaults to all detected pairs.",
+    )
     args = parser.parse_args()
+
+    FILTER_WINDOW = max(1, args.filter_window)
+    FILTER_ALPHA = max(0.0, min(1.0, args.filter_alpha))
+    FILTER_MAX_JUMP_M = max(0.0, args.filter_max_jump_m)
+    display_marker_pairs = NormalizeMarkerPairs(args.display_pair)
+
+    mqtt_marker_pairs = args.mqtt_marker_pair or []
+    if (args.mqtt_broker is not None or mqtt_marker_pairs) and (
+        args.mqtt_broker is None or not mqtt_marker_pairs
+    ):
+        parser.error(
+            "--mqtt-broker and at least one --mqtt-marker-pair must be used together."
+        )
 
     if args.calibrate:
         calibration_mode = True
@@ -750,4 +1162,28 @@ if __name__ == "__main__":
             print(f"Loaded saved calibration from {CALIBRATION_FILE}")
 
     worker.Start()
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+    mqtt_publisher = None
+    if args.mqtt_broker is not None:
+        mqtt_publisher = DistanceMqttPublisher(
+            broker=args.mqtt_broker,
+            port=args.mqtt_port,
+            robot_id=MQTT_ROBOT_ID,
+            period=args.mqtt_period,
+            payload_provider=lambda: BuildDistanceEventPayloads(
+                MQTT_ROBOT_ID,
+                mqtt_marker_pairs,
+            ),
+        )
+        mqtt_publisher.Start()
+        print(
+            "Publishing MQTT distance pairs:",
+            mqtt_marker_pairs,
+            "on",
+            mqtt_publisher.topic,
+        )
+
+    try:
+        app.run(host="0.0.0.0", port=5000, threaded=True)
+    finally:
+        if mqtt_publisher is not None:
+            mqtt_publisher.Stop()

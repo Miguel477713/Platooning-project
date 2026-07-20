@@ -11,15 +11,16 @@ WAIT_FOR_ASSIGNMENT --> GLOBAL_SEARCH : receive ASSIGNMENT\nset initial target/c
 
 GLOBAL_SEARCH : global_detect(current_target_color)
 GLOBAL_SEARCH : if not detected and Superintendent far -> global_search_guided_motion()
-GLOBAL_SEARCH : if not detected and no Superintendent -> global_search_motion()
+GLOBAL_SEARCH : if not detected and no Superintendent -> global_search_stop()
 GLOBAL_SEARCH --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
 GLOBAL_SEARCH --> GLOBAL_VISUAL_ACQUIRE : target not detected\nand Superintendent distance <= 0.80m\npublish SUPERINTENDENT_ACQUIRE_RANGE_REACHED
 GLOBAL_SEARCH --> GLOBAL_SEARCH : target not detected
 
 GLOBAL_VISUAL_ACQUIRE : global_detect(current_target_color)
 GLOBAL_VISUAL_ACQUIRE : pan camera left/right
+GLOBAL_VISUAL_ACQUIRE : if pan near limit -> rotate body in place
 GLOBAL_VISUAL_ACQUIRE : small Superintendent-guided creep moves
-GLOBAL_VISUAL_ACQUIRE : stop between creep moves to settle image
+GLOBAL_VISUAL_ACQUIRE : stop between rotate/creep moves to settle image
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : Superintendent stale
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : Superintendent distance > 1.10m\npublish SUPERINTENDENT_ACQUIRE_RANGE_EXITED
@@ -28,7 +29,7 @@ GLOBAL_VISUAL_ACQUIRE --> GLOBAL_VISUAL_ACQUIRE : target not detected\ncontinue 
 
 GLOBAL_APPROACH : global_detect(current_target_color)
 GLOBAL_APPROACH : approach current target
-GLOBAL_APPROACH --> LOST_TARGET : target not detected\nand timeout exceeded
+GLOBAL_APPROACH --> GLOBAL_SEARCH : target not detected\nand timeout exceeded\npublish TARGET_LOST_GLOBAL
 GLOBAL_APPROACH --> GLOBAL_APPROACH : target detected\nbut distance > goal
 GLOBAL_APPROACH --> LOCAL_LOCK : reached goal\nand current target == final target
 GLOBAL_APPROACH --> WAIT_FOR_FINAL_TARGET_READY : reached wait zone\nbut current target != final target
