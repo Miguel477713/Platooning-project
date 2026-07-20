@@ -28,10 +28,11 @@ Start the follower with the overhead marker pair assigned to this robot:
 
 ```bash
 python3 /Platooning-project/run_follower.py \
+  --lock-tilt \
   --robot-id Hexapod1 \
   --broker 10.0.7.51 \
-  --superintendent-source-marker green \
-  --superintendent-target-marker pink
+  --superintendent-source-marker pink \
+  --superintendent-target-marker green
 ```
 
 `--superintendent-source-marker` is the overhead marker attached to this

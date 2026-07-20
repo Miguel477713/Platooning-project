@@ -1,0 +1,18 @@
+[Unit]
+Description=Overhead Camera Distance Detection and MQTT Publisher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=cinvestav-jetson
+WorkingDirectory=/Platooning-project
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u /Platooning-project/DistanceDetection/DistanceDetection.py --mqtt-broker 10.0.7.51 --mqtt-marker-pair pink:green
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
