@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import time
@@ -28,16 +29,25 @@ SPEED_MIN = 2
 SPEED_MAX = 10
 MOVE_FORWARD_Y = 12
 MOVE_BACKWARD_Y = -10
-OVERHEAD_MOVE_GAIN = 18
-OVERHEAD_MAX_STEP = 14
-OVERHEAD_AXIS_DEADZONE_M = 0.08
 OVERHEAD_CLOSE_DISTANCE_M = 0.40
-VISUAL_ACQUIRE_MOVE_GAIN = 8
-VISUAL_ACQUIRE_MAX_STEP = 5
+OVERHEAD_FORWARD_Y = 10
+OVERHEAD_ROTATE_STEP = 4
+OVERHEAD_IMU_ROTATE_DEG = 22.5
+OVERHEAD_IMU_ROTATE_TOLERANCE_DEG = 3.0
+OVERHEAD_IMU_CALIBRATION_MIN_DISTANCE_M = 0.20
+OVERHEAD_PROBE_INTERVAL = 1.5
+OVERHEAD_ROTATE_INTERVAL = 0.45
+OVERHEAD_IMPROVEMENT_EPS_M = 0.015
+OVERHEAD_FRONTIER_STOP_DISTANCE_M = 0.30
+OVERHEAD_FRONTIER_WARNING_DISTANCE_M = 0.55
+OVERHEAD_FRONTIER_CLOSING_EPS_M = 0.03
+OVERHEAD_FRONTIER_TURN_STEP = 5
 VISUAL_ACQUIRE_MOVE_INTERVAL = 0.35
 VISUAL_ACQUIRE_PAN_STEP = 2
 VISUAL_ACQUIRE_ROTATE_PAN_THRESHOLD = 26
 VISUAL_ACQUIRE_ROTATE_STEP = 3
+GLOBAL_SEARCH_RETURN_MOVE_INTERVAL = 0.35
+GLOBAL_SEARCH_MEMORY_MAX_STEPS = 100
 
 PAN_MAX = 35
 TILT_MAX = 35
@@ -77,6 +87,14 @@ def signed_step(value, gain, max_step):
     step = int(round(abs(value) * gain))
     step = clamp(step, 1, max_step)
     return step if value > 0 else -step
+
+
+def normalize_angle_deg(angle):
+    return (angle + 180.0) % 360.0 - 180.0
+
+
+def angle_delta_deg(target, current):
+    return normalize_angle_deg(target - current)
 
 
 class FollowerRobotImplementation:
@@ -119,6 +137,13 @@ class FollowerRobotImplementation:
             f"source={measurement.source_marker}, target={measurement.target_marker}, "
             f"distance={measurement.distance_m}, dx={measurement.dx_m}, dy={measurement.dy_m}"
         )
+
+    def global_search_return_motion(self) -> bool:
+        print("[MOTOR] global search return motion unavailable")
+        return False
+
+    def clear_global_search_memory(self) -> None:
+        pass
 
     def global_visual_acquire_motion(self, measurement: SuperintendentMeasurement) -> None:
         print(
@@ -171,6 +196,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         occluded_target_area_max: float = OCCLUDED_TARGET_AREA_MAX,
         occlusion_dark_ratio: float = OCCLUSION_DARK_RATIO,
         show_video: bool = False,
+        enable_imu_search: bool = False,
     ):
         self.speed = clamp(int(speed), SPEED_MIN, SPEED_MAX)
         self.target_area_min = clamp(target_area, 0.01, 0.90)
@@ -188,6 +214,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.occluded_target_area_max = clamp(occluded_target_area_max, 0.001, 0.20)
         self.occlusion_dark_ratio = clamp(occlusion_dark_ratio, 0.05, 0.90)
         self.show_video = show_video
+        self.enable_imu_search = enable_imu_search
         self.video_window_name = "Follower Direct Camera"
         self.pan_max = clamp(int(pan_max), 10, 60)
         self.tilt_max = clamp(int(tilt_max), 10, 60)
@@ -209,11 +236,26 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.last_frame_time = 0.0
         self.visual_acquire_pan_direction = 1
         self.last_visual_acquire_move = 0.0
+        self.global_search_move_history = []
+        self.last_global_search_return_move = 0.0
+        self.overhead_last_distance_m = None
+        self.overhead_last_action = None
+        self.overhead_last_action_time = 0.0
+        self.overhead_turn_direction = 1
+        self.overhead_failed_probe_count = 0
+        self.overhead_last_frontier_distance_m = None
+        self.overhead_last_frontier_distance_m = None
 
         self.server_dir = self._prepare_freenove_imports()
         self.control = None
         self.camera = None
         self.ultrasonic = None
+        self.imu = None
+        self.imu_search_available = False
+        self.imu_heading_reference_deg = None
+        self.imu_reference_yaw_deg = None
+        self.overhead_rotate_target_yaw_deg = None
+        self.imu_forward_calibration_start = None
         self._initialize_hardware()
 
     def _prepare_freenove_imports(self) -> Path:
@@ -238,6 +280,9 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
             self.control = Control()
             self.control.condition_thread.daemon = True
             self.control.condition_thread.start()
+            if self.enable_imu_search:
+                self.imu = getattr(self.control, "imu", None)
+                self.imu_search_available = self.imu is not None
             self.camera = Camera()
             self.camera.start_stream()
             self.ultrasonic = Ultrasonic()
@@ -436,47 +481,40 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
     def global_search_guided_motion(self, measurement: SuperintendentMeasurement) -> None:
         if self.camera_only:
             self.action_status = "overhead-camera-only"
+            self.clear_forward_motion_calibration()
             self.stop_motors()
             return
 
         distance_m = measurement.distance_m
-        dx_m = measurement.dx_m
-        dy_m = measurement.dy_m
 
-        if distance_m is None or dx_m is None or dy_m is None:
+        if distance_m is None:
             self.action_status = "overhead-missing"
+            self.clear_forward_motion_calibration()
             self.stop_motors()
             return
 
         distance_cm = self.request_ultrasonic_distance()
         if distance_cm is not None and distance_cm < OBSTACLE_MIN_CM:
             self.action_status = "overhead-obstacle-back"
+            self.clear_forward_motion_calibration()
             self.send_move_xy(0, MOVE_BACKWARD_Y, 0)
             return
 
         if distance_m <= OVERHEAD_CLOSE_DISTANCE_M:
             self.action_status = "overhead-close-hold"
+            self.clear_forward_motion_calibration()
             self.stop_motors()
             return
 
-        x = 0
-        y = 0
-        if abs(dx_m) > OVERHEAD_AXIS_DEADZONE_M:
-            x = clamp(int(round(dx_m * OVERHEAD_MOVE_GAIN)), -OVERHEAD_MAX_STEP, OVERHEAD_MAX_STEP)
-        if abs(dy_m) > OVERHEAD_AXIS_DEADZONE_M:
-            y = clamp(int(round(dy_m * OVERHEAD_MOVE_GAIN)), -OVERHEAD_MAX_STEP, OVERHEAD_MAX_STEP)
-
-        if x == 0 and y == 0:
-            self.action_status = "overhead-deadzone"
-            self.stop_motors()
+        if self.overhead_frontier_avoidance(measurement, "overhead"):
             return
 
-        self.action_status = "overhead-guided"
-        self.send_move_xy(x, y, 0)
+        self.global_search_feedback_motion(distance_m, measurement)
 
     def global_visual_acquire_motion(self, measurement: SuperintendentMeasurement) -> None:
         if self.camera_only:
             self.action_status = "visual-acquire-camera-only"
+            self.clear_forward_motion_calibration()
             self.visual_acquire_camera_sweep()
             self.stop_motors()
             return
@@ -484,23 +522,24 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.visual_acquire_camera_sweep()
 
         distance_m = measurement.distance_m
-        dx_m = measurement.dx_m
-        dy_m = measurement.dy_m
 
-        if distance_m is None or dx_m is None or dy_m is None:
+        if distance_m is None:
             self.action_status = "visual-acquire-missing"
+            self.clear_forward_motion_calibration()
             self.stop_motors()
             return
 
         distance_cm = self.request_ultrasonic_distance()
         if distance_cm is not None and distance_cm < OBSTACLE_MIN_CM:
             self.action_status = "visual-acquire-obstacle-back"
+            self.clear_forward_motion_calibration()
             self.send_move_xy(0, MOVE_BACKWARD_Y, 0)
             return
 
         now = time.time()
         if now - self.last_visual_acquire_move < VISUAL_ACQUIRE_MOVE_INTERVAL:
             self.action_status = "visual-acquire-settle"
+            self.clear_forward_motion_calibration()
             self.stop_motors()
             return
 
@@ -508,32 +547,253 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         if turn != 0:
             self.last_visual_acquire_move = now
             self.action_status = "visual-acquire-rotate"
+            self.clear_forward_motion_calibration()
             self.send_move_xy(0, 0, turn)
             return
 
-        x = 0
-        y = 0
-        if abs(dx_m) > OVERHEAD_AXIS_DEADZONE_M:
-            x = clamp(
-                int(round(dx_m * VISUAL_ACQUIRE_MOVE_GAIN)),
-                -VISUAL_ACQUIRE_MAX_STEP,
-                VISUAL_ACQUIRE_MAX_STEP,
-            )
-        if distance_m > OVERHEAD_CLOSE_DISTANCE_M and abs(dy_m) > OVERHEAD_AXIS_DEADZONE_M:
-            y = clamp(
-                int(round(dy_m * VISUAL_ACQUIRE_MOVE_GAIN)),
-                -VISUAL_ACQUIRE_MAX_STEP,
-                VISUAL_ACQUIRE_MAX_STEP,
-            )
-
         self.last_visual_acquire_move = now
-        if x == 0 and y == 0:
+        if distance_m <= OVERHEAD_CLOSE_DISTANCE_M:
             self.action_status = "visual-acquire-hold"
+            self.clear_forward_motion_calibration()
             self.stop_motors()
             return
 
-        self.action_status = "visual-acquire-creep"
-        self.send_move_xy(x, y, 0)
+        if self.overhead_frontier_avoidance(measurement, "visual-acquire"):
+            return
+
+        self.global_search_feedback_motion(
+            distance_m,
+            measurement,
+            status_prefix="visual-acquire",
+        )
+
+    def overhead_frontier_avoidance(self, measurement, status_prefix):
+        frontier_distance_m = measurement.source_frontier_distance_m
+        if frontier_distance_m is None:
+            return False
+
+        previous_distance_m = self.overhead_last_frontier_distance_m
+        self.overhead_last_frontier_distance_m = frontier_distance_m
+
+        close_to_frontier = frontier_distance_m <= OVERHEAD_FRONTIER_STOP_DISTANCE_M
+        closing_on_frontier = (
+            previous_distance_m is not None
+            and frontier_distance_m <= OVERHEAD_FRONTIER_WARNING_DISTANCE_M
+            and frontier_distance_m < previous_distance_m - OVERHEAD_FRONTIER_CLOSING_EPS_M
+        )
+
+        if not close_to_frontier and not closing_on_frontier:
+            return False
+
+        turn = self.overhead_turn_direction * OVERHEAD_FRONTIER_TURN_STEP
+        side = measurement.source_frontier_side or "unknown"
+        self.action_status = f"{status_prefix}-frontier-turn-{side}"
+        self.clear_forward_motion_calibration()
+        self.send_move_xy(0, 0, turn)
+        self.remember_global_search_move(0, 0, turn)
+        self.overhead_last_action = "rotate"
+        self.overhead_last_action_time = time.time()
+        self.overhead_last_distance_m = measurement.distance_m
+        return True
+
+    def read_imu_yaw_deg(self):
+        if not self.enable_imu_search or not self.imu_search_available or self.imu is None:
+            return None
+
+        try:
+            _, _, yaw_deg = self.imu.update_imu_state()
+        except Exception as exc:
+            print("[IMU] disabling search yaw integration:", exc)
+            self.imu_search_available = False
+            return None
+
+        return normalize_angle_deg(float(yaw_deg))
+
+    def calibrated_heading_deg(self):
+        yaw_deg = self.read_imu_yaw_deg()
+        return self.calibrated_heading_from_yaw_deg(yaw_deg)
+
+    def calibrated_heading_from_yaw_deg(self, yaw_deg):
+        if (
+            yaw_deg is None
+            or self.imu_heading_reference_deg is None
+            or self.imu_reference_yaw_deg is None
+        ):
+            return None
+
+        return normalize_angle_deg(
+            self.imu_heading_reference_deg
+            + angle_delta_deg(yaw_deg, self.imu_reference_yaw_deg)
+        )
+
+    def search_heading_deg(self):
+        yaw_deg = self.read_imu_yaw_deg()
+        heading_deg = self.calibrated_heading_from_yaw_deg(yaw_deg)
+        if heading_deg is not None:
+            return heading_deg
+        return yaw_deg
+
+    def maybe_calibrate_imu_from_forward_motion(self, measurement):
+        if not self.enable_imu_search or not self.imu_search_available:
+            return
+
+        world_x = measurement.source_world_x_m
+        world_y = measurement.source_world_y_m
+        if world_x is None or world_y is None:
+            self.imu_forward_calibration_start = None
+            return
+
+        current_yaw = self.read_imu_yaw_deg()
+        if current_yaw is None:
+            self.imu_forward_calibration_start = None
+            return
+
+        if self.imu_forward_calibration_start is None:
+            self.imu_forward_calibration_start = (world_x, world_y, current_yaw)
+            return
+
+        start_x, start_y, _start_yaw = self.imu_forward_calibration_start
+        dx = world_x - start_x
+        dy = world_y - start_y
+        moved_m = math.hypot(dx, dy)
+        if moved_m < OVERHEAD_IMU_CALIBRATION_MIN_DISTANCE_M:
+            return
+
+        trajectory_heading = math.degrees(math.atan2(dy, dx))
+        self.imu_heading_reference_deg = normalize_angle_deg(trajectory_heading)
+        self.imu_reference_yaw_deg = current_yaw
+        self.imu_forward_calibration_start = (world_x, world_y, current_yaw)
+        print(
+            "[IMU] calibrated search heading "
+            f"world_heading={self.imu_heading_reference_deg:.1f}, "
+            f"imu_yaw={self.imu_reference_yaw_deg:.1f}, moved={moved_m:.2f}m"
+        )
+
+    def clear_forward_motion_calibration(self):
+        self.imu_forward_calibration_start = None
+
+    def start_imu_search_rotation(self):
+        heading_deg = self.search_heading_deg()
+        if heading_deg is None:
+            self.overhead_rotate_target_yaw_deg = None
+            return False
+
+        rotate_deg = self.overhead_turn_direction * OVERHEAD_IMU_ROTATE_DEG
+        self.overhead_rotate_target_yaw_deg = normalize_angle_deg(heading_deg + rotate_deg)
+        return True
+
+    def imu_search_rotation_complete(self):
+        if self.overhead_rotate_target_yaw_deg is None:
+            return False
+
+        heading_deg = self.search_heading_deg()
+        if heading_deg is None:
+            self.overhead_rotate_target_yaw_deg = None
+            return False
+
+        remaining_deg = abs(angle_delta_deg(self.overhead_rotate_target_yaw_deg, heading_deg))
+        return remaining_deg <= OVERHEAD_IMU_ROTATE_TOLERANCE_DEG
+
+    def global_search_feedback_motion(self, distance_m, measurement, status_prefix="overhead"):
+        now = time.time()
+
+        if self.overhead_last_distance_m is None:
+            self.overhead_last_distance_m = distance_m
+            self.overhead_last_action = "forward"
+            self.overhead_last_action_time = now
+
+        elapsed = now - self.overhead_last_action_time
+        if self.overhead_last_action == "forward" and elapsed >= OVERHEAD_PROBE_INTERVAL:
+            improved = distance_m < self.overhead_last_distance_m - OVERHEAD_IMPROVEMENT_EPS_M
+            if improved:
+                self.overhead_failed_probe_count = 0
+            else:
+                self.overhead_failed_probe_count += 1
+                if self.overhead_failed_probe_count % 3 == 0:
+                    self.overhead_turn_direction *= -1
+                self.overhead_last_action = "rotate"
+                self.clear_forward_motion_calibration()
+                self.start_imu_search_rotation()
+            self.overhead_last_distance_m = distance_m
+            self.overhead_last_action_time = now
+
+        elif self.overhead_last_action == "rotate":
+            rotate_done = (
+                self.imu_search_rotation_complete()
+                if self.enable_imu_search and self.imu_search_available
+                else elapsed >= OVERHEAD_ROTATE_INTERVAL
+            )
+            if rotate_done:
+                self.overhead_last_distance_m = distance_m
+                self.overhead_last_action = "forward"
+                self.overhead_last_action_time = now
+                self.overhead_rotate_target_yaw_deg = None
+
+        if self.overhead_last_action == "rotate":
+            turn = self.overhead_turn_direction * OVERHEAD_ROTATE_STEP
+            self.action_status = f"{status_prefix}-imu-turn-test" if self.overhead_rotate_target_yaw_deg is not None else f"{status_prefix}-turn-test"
+            self.send_move_xy(0, 0, turn)
+            self.remember_global_search_move(0, 0, turn)
+            return
+
+        self.maybe_calibrate_imu_from_forward_motion(measurement)
+        self.action_status = f"{status_prefix}-forward-test"
+        self.send_move_xy(0, OVERHEAD_FORWARD_Y, 0)
+        self.remember_global_search_move(0, OVERHEAD_FORWARD_Y, 0)
+
+    def remember_global_search_move(self, x, y, angle=0):
+        if x == 0 and y == 0 and angle == 0:
+            return
+
+        self.global_search_move_history.append((int(x), int(y), int(angle)))
+        if len(self.global_search_move_history) > GLOBAL_SEARCH_MEMORY_MAX_STEPS:
+            self.global_search_move_history.pop(0)
+
+    def global_search_return_motion(self) -> bool:
+        if self.camera_only:
+            self.action_status = "return-camera-only"
+            self.stop_motors()
+            return False
+
+        now = time.time()
+        if now - self.last_global_search_return_move < GLOBAL_SEARCH_RETURN_MOVE_INTERVAL:
+            self.action_status = "return-settle"
+            self.stop_motors()
+            return True
+
+        while self.global_search_move_history:
+            x, y, angle = self.global_search_move_history.pop()
+            if x == 0 and y == 0 and angle == 0:
+                continue
+
+            distance_cm = self.request_ultrasonic_distance()
+            if distance_cm is not None and distance_cm < OBSTACLE_MIN_CM:
+                self.action_status = "return-obstacle-back"
+                self.send_move_xy(0, MOVE_BACKWARD_Y, 0)
+                return True
+
+            self.last_global_search_return_move = now
+            self.action_status = "return-memory"
+            self.send_move_xy(-x, -y, -angle)
+            return True
+
+        self.action_status = "return-empty"
+        self.stop_motors()
+        return False
+
+    def clear_global_search_memory(self) -> None:
+        self.global_search_move_history = []
+        self.last_global_search_return_move = 0.0
+        self.clear_overhead_feedback()
+
+    def clear_overhead_feedback(self) -> None:
+        self.overhead_last_distance_m = None
+        self.overhead_last_action = None
+        self.overhead_last_action_time = 0.0
+        self.overhead_turn_direction = 1
+        self.overhead_failed_probe_count = 0
+        self.overhead_rotate_target_yaw_deg = None
+        self.clear_forward_motion_calibration()
 
     def visual_acquire_camera_sweep(self):
         self.pan_angle += self.visual_acquire_pan_direction * VISUAL_ACQUIRE_PAN_STEP
@@ -676,6 +936,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
 
     def reset_camera(self):
         self.pan_angle = 0
+        self.tilt_angle = 0
         self.send_camera(force=True)
 
     def close(self):

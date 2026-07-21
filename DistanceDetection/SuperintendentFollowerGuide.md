@@ -29,6 +29,7 @@ Start the follower with the overhead marker pair assigned to this robot:
 ```bash
 python3 /Platooning-project/run_follower.py \
   --lock-tilt \
+  --enable-imu-search \
   --robot-id Hexapod1 \
   --broker 10.0.7.51 \
   --superintendent-source-marker pink \
@@ -69,6 +70,14 @@ The robot uses `distance_m`, `dx_m`, and `dy_m` from the payload.
 
 `dx_m` and `dy_m` are the overhead world-plane vector from the source marker to
 the target marker.
+
+If the follower is started with `--enable-imu-search`, overhead search rotations
+use IMU yaw instead of fixed rotate timing. During clean forward-only overhead
+search probes, the follower also uses `source_world_x_m` and `source_world_y_m`
+to recalibrate the IMU heading reference after the source marker has moved far
+enough. This calibration is reset whenever the robot stops, backs up, turns, or
+hits frontier avoidance, so sideways or curved motion is not treated as body
+heading.
 
 ## State Behavior
 

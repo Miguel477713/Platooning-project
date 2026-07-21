@@ -34,12 +34,13 @@ RTSP_URL = os.getenv(
 MIN_AREA = int(os.getenv("MIN_AREA", "300"))
 TARGET_FPS = float(os.getenv("TARGET_FPS", "30"))
 PROCESS_WIDTH = int(os.getenv("PROCESS_WIDTH", "0"))  # 0 disables resize
-JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "65"))
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "95"))
 DEFAULT_CALIBRATION_DISTANCE = 100.0
 MQTT_ROBOT_ID = "Superintendent"
 FILTER_WINDOW = int(os.getenv("FILTER_WINDOW", "5"))
 FILTER_ALPHA = float(os.getenv("FILTER_ALPHA", "0.35"))
 FILTER_MAX_JUMP_M = float(os.getenv("FILTER_MAX_JUMP_M", "0.50"))
+FILTER_MAX_JUMP_REJECTS = int(os.getenv("FILTER_MAX_JUMP_REJECTS", "3"))
 CALIBRATION_FILE = Path(
     os.getenv(
         "CALIBRATION_FILE",
@@ -64,14 +65,6 @@ COLORS = {
     "green": [
         ((38, 70, 70), (55, 255, 255)),
         ((38, 49, 87), (54, 189, 227))
-    ],
-}
-
-COLOR_EXCLUSIONS = {
-    # Red sample from colorPicker.py (#7c1b3c):
-    # center [170, 199, 124], lower (162, 129, 54), upper (178, 255, 194).
-    "pink": [
-        ((162, 129, 54), (178, 255, 194)),
     ],
 }
 
@@ -104,6 +97,33 @@ def DistanceToMeters(distance, unit):
         return None
 
     return distance_value * scale
+
+
+def WorldPositionPayload(world_position, active_calibration):
+    if world_position is None or active_calibration is None:
+        return None
+
+    x_world, y_world = world_position
+    width = active_calibration.width
+    height = active_calibration.height
+    unit = active_calibration.unit
+    frontier_distances = {
+        "left": x_world,
+        "right": width - x_world,
+        "top": y_world,
+        "bottom": height - y_world,
+    }
+    frontier_side, frontier_distance = min(
+        frontier_distances.items(),
+        key=lambda item: item[1],
+    )
+
+    return {
+        "world_x_m": DistanceToMeters(x_world, unit),
+        "world_y_m": DistanceToMeters(y_world, unit),
+        "frontier_distance_m": DistanceToMeters(frontier_distance, unit),
+        "frontier_side": frontier_side,
+    }
 
 
 def DistanceFromMeters(distance_m, unit):
@@ -387,7 +407,7 @@ def ResizeForProcessing(frame):
     return cv2.resize(frame, (PROCESS_WIDTH, new_height), interpolation=cv2.INTER_AREA)
 
 
-def BuildColorMask(hsv, ranges, excluded_ranges=None):
+def BuildColorMask(hsv, ranges):
     mask_total = None
 
     for lower, upper in ranges:
@@ -396,20 +416,14 @@ def BuildColorMask(hsv, ranges, excluded_ranges=None):
         mask = cv2.inRange(hsv, lower, upper)
         mask_total = mask if mask_total is None else cv2.bitwise_or(mask_total, mask)
 
-    for lower, upper in excluded_ranges or []:
-        lower = np.array(lower, dtype=np.uint8)
-        upper = np.array(upper, dtype=np.uint8)
-        excluded_mask = cv2.inRange(hsv, lower, upper)
-        mask_total = cv2.bitwise_and(mask_total, cv2.bitwise_not(excluded_mask))
-
     kernel = np.ones((5, 5), np.uint8)
     mask_total = cv2.erode(mask_total, kernel, iterations=1)
     mask_total = cv2.dilate(mask_total, kernel, iterations=2)
     return mask_total
 
 
-def FindBlobCenters(hsv, ranges, excluded_ranges=None):
-    mask_total = BuildColorMask(hsv, ranges, excluded_ranges)
+def FindBlobCenters(hsv, ranges):
+    mask_total = BuildColorMask(hsv, ranges)
 
     contours, _ = cv2.findContours(
         mask_total,
@@ -434,8 +448,8 @@ def FindBlobCenters(hsv, ranges, excluded_ranges=None):
     return sorted(centers, key=lambda item: item[2], reverse=True)
 
 
-def FindBlobCenter(hsv, ranges, excluded_ranges=None):
-    centers = FindBlobCenters(hsv, ranges, excluded_ranges)
+def FindBlobCenter(hsv, ranges):
+    centers = FindBlobCenters(hsv, ranges)
     return centers[0] if centers else None
 
 
@@ -444,7 +458,7 @@ def DetectMarkerPositions(frame):
     positions = {}
 
     for color_name, ranges in COLORS.items():
-        result = FindBlobCenter(hsv, ranges, COLOR_EXCLUSIONS.get(color_name))
+        result = FindBlobCenter(hsv, ranges)
 
         if result is not None:
             cx, cy, area = result
@@ -473,13 +487,25 @@ def MarkerPoint(position):
 
 
 class DistanceStabilizer:
-    def __init__(self, window_size, alpha, max_jump_m):
+    def __init__(self, window_size, alpha, max_jump_m, max_jump_rejects):
         self.samples = deque(maxlen=max(1, window_size))
         self.alpha = max(0.0, min(1.0, alpha))
         self.max_jump_m = max_jump_m
+        self.max_jump_rejects = max(1, max_jump_rejects)
         self.filtered_m = None
+        self.rejected_jump_count = 0
+        self.last_update_reset_filter = False
+
+    def Reset(self, raw_distance_m):
+        self.samples.clear()
+        self.samples.append(raw_distance_m)
+        self.filtered_m = raw_distance_m
+        self.rejected_jump_count = 0
+        self.last_update_reset_filter = True
+        return self.filtered_m
 
     def Update(self, raw_distance_m):
+        self.last_update_reset_filter = False
         if raw_distance_m is None:
             return self.filtered_m
 
@@ -488,8 +514,12 @@ class DistanceStabilizer:
             and self.max_jump_m > 0.0
             and abs(raw_distance_m - self.filtered_m) > self.max_jump_m
         ):
+            self.rejected_jump_count += 1
+            if self.rejected_jump_count >= self.max_jump_rejects:
+                return self.Reset(raw_distance_m)
             return self.filtered_m
 
+        self.rejected_jump_count = 0
         self.samples.append(raw_distance_m)
         median_distance_m = median(self.samples)
 
@@ -512,10 +542,21 @@ def StabilizeDistance(key, raw_distance_m):
                 FILTER_WINDOW,
                 FILTER_ALPHA,
                 FILTER_MAX_JUMP_M,
+                FILTER_MAX_JUMP_REJECTS,
             )
             distance_filters[key] = stabilizer
 
-        return stabilizer.Update(raw_distance_m)
+        distance_m = stabilizer.Update(raw_distance_m)
+        return {
+            "distance_m": distance_m,
+            "reset_filter": stabilizer.last_update_reset_filter,
+            "rejected_jump_count": stabilizer.rejected_jump_count,
+        }
+
+
+def ClearDistanceFilters():
+    with distance_filters_lock:
+        distance_filters.clear()
 
 
 def BuildDistanceMeasurements(positions, active_calibration):
@@ -549,14 +590,19 @@ def BuildDistanceMeasurements(positions, active_calibration):
                 dy_world = world_p2[1] - world_p1[1]
                 dx_m = DistanceToMeters(dx_world, unit)
                 dy_m = DistanceToMeters(dy_world, unit)
-                distance_m = StabilizeDistance(
+                stabilization = StabilizeDistance(
                     MeasurementKey(name_a, name_b),
                     raw_distance_m,
                 )
+                distance_m = stabilization["distance_m"]
                 distance = DistanceFromMeters(distance_m, unit)
             else:
                 dx_m = None
                 dy_m = None
+                stabilization = {
+                    "reset_filter": False,
+                    "rejected_jump_count": 0,
+                }
 
             payload = {
                 "from": name_a,
@@ -572,6 +618,8 @@ def BuildDistanceMeasurements(positions, active_calibration):
                 "raw_distance": raw_distance,
                 "raw_distance_m": raw_distance_m,
                 "filtered": distance_m is not None,
+                "filter_reset": stabilization["reset_filter"],
+                "filter_rejected_jump_count": stabilization["rejected_jump_count"],
             }
 
             measurements[MeasurementKey(name_a, name_b)] = payload
@@ -582,17 +630,40 @@ def BuildDistanceMeasurements(positions, active_calibration):
             reverse_payload["dy_pixels"] = -dy_pixels
             reverse_payload["dx_m"] = None if dx_m is None else -dx_m
             reverse_payload["dy_m"] = None if dy_m is None else -dy_m
-            reverse_payload["distance_m"] = StabilizeDistance(
+            reverse_stabilization = StabilizeDistance(
                 MeasurementKey(name_b, name_a),
                 raw_distance_m,
             )
+            reverse_payload["distance_m"] = reverse_stabilization["distance_m"]
             reverse_payload["distance"] = DistanceFromMeters(
                 reverse_payload["distance_m"],
                 unit,
             )
+            reverse_payload["filter_reset"] = reverse_stabilization["reset_filter"]
+            reverse_payload["filter_rejected_jump_count"] = reverse_stabilization[
+                "rejected_jump_count"
+            ]
             measurements[MeasurementKey(name_b, name_a)] = reverse_payload
 
     return measurements
+
+
+def BuildWorldPositions(positions, active_calibration):
+    if active_calibration is None:
+        return {}
+
+    transform, _ = active_calibration.GetCachedTransform()
+    if transform is None:
+        return {}
+
+    world_positions = {}
+    for name, position in positions.items():
+        marker_point = MarkerPoint(position)
+        world_positions[name] = WorldPositionPayload(
+            active_calibration.ProjectPoint(transform, marker_point),
+            active_calibration,
+        )
+    return world_positions
 
 
 def GetMeasurementSnapshot():
@@ -607,12 +678,14 @@ def GetMeasurementSnapshot():
         active_calibration = calibration
 
     measurements = BuildDistanceMeasurements(positions, active_calibration)
+    world_positions = BuildWorldPositions(positions, active_calibration)
     return {
         "timestamp": time.time(),
         "calibrated": active_calibration is not None
         and active_calibration.transform is not None,
         "unit": active_calibration.unit if active_calibration is not None else None,
         "positions": positions,
+        "world_positions": world_positions,
         "distances": measurements,
     }
 
@@ -634,6 +707,7 @@ def BuildDistanceEventPayload(robot_id, marker_a, marker_b):
         }
 
     measurement = snapshot["distances"].get(MeasurementKey(marker_a, marker_b))
+    source_world_position = snapshot.get("world_positions", {}).get(marker_a, {})
     if measurement is None:
         return {
             "type": "EVENT",
@@ -665,11 +739,18 @@ def BuildDistanceEventPayload(robot_id, marker_a, marker_b):
         "dy_pixels": measurement.get("dy_pixels"),
         "dx_m": measurement.get("dx_m"),
         "dy_m": measurement.get("dy_m"),
+        "source_world_x_m": source_world_position.get("world_x_m"),
+        "source_world_y_m": source_world_position.get("world_y_m"),
+        "source_frontier_distance_m": source_world_position.get("frontier_distance_m"),
+        "source_frontier_side": source_world_position.get("frontier_side"),
         "calibrated": snapshot["calibrated"],
         "filtered": measurement.get("filtered", False),
+        "filter_reset": measurement.get("filter_reset", False),
+        "filter_rejected_jump_count": measurement.get("filter_rejected_jump_count", 0),
         "filter_window": FILTER_WINDOW,
         "filter_alpha": FILTER_ALPHA,
         "filter_max_jump_m": FILTER_MAX_JUMP_M,
+        "filter_max_jump_rejects": FILTER_MAX_JUMP_REJECTS,
         "measurement_timestamp": snapshot["timestamp"],
     }
 
@@ -801,10 +882,11 @@ def ProcessFrame(frame):
 
             measurement = measurements.get(MeasurementKey(name_a, name_b))
             if measurement and measurement["distance"] is not None:
+                filter_note = " reset" if measurement.get("filter_reset") else ""
                 distance_label = (
                     f"{name_a}-{name_b}: "
                     f"raw {measurement['raw_distance']:.2f} {measurement['unit']} | "
-                    f"stable {measurement['distance']:.2f} {measurement['unit']}"
+                    f"stable {measurement['distance']:.2f} {measurement['unit']}{filter_note}"
                 )
             else:
                 distance_label = f"{name_a}-{name_b}: calibration needed"
@@ -878,6 +960,7 @@ def AddCalibrationClick():
         if len(clicked_points) >= 4:
             return jsonify(error="Four points are already selected. Reset to recalibrate."), 409
         clicked_points.append(point)
+        ClearDistanceFilters()
 
     return jsonify(CalibrationState())
 
@@ -904,6 +987,7 @@ def ApplyCalibration():
         if not new_calibration.TryInitialize(clicked_points):
             return jsonify(error="Could not create the calibration transform."), 400
         calibration = new_calibration
+        ClearDistanceFilters()
         try:
             SaveCalibration(clicked_points, calibration)
         except OSError as error:
@@ -920,6 +1004,7 @@ def ResetCalibration():
             return jsonify(error="Restart with --calibrate to change the saved calibration."), 403
         clicked_points.clear()
         calibration = None
+        ClearDistanceFilters()
     return jsonify(CalibrationState())
 
 
@@ -1143,6 +1228,12 @@ if __name__ == "__main__":
         help="Ignore single-sample jumps larger than this many meters. Use 0 to disable.",
     )
     parser.add_argument(
+        "--filter-max-jump-rejects",
+        type=int,
+        default=FILTER_MAX_JUMP_REJECTS,
+        help="Reset stabilization after this many consecutive large jumps.",
+    )
+    parser.add_argument(
         "--display-pair",
         action="append",
         type=ParseMarkerPair,
@@ -1153,6 +1244,7 @@ if __name__ == "__main__":
     FILTER_WINDOW = max(1, args.filter_window)
     FILTER_ALPHA = max(0.0, min(1.0, args.filter_alpha))
     FILTER_MAX_JUMP_M = max(0.0, args.filter_max_jump_m)
+    FILTER_MAX_JUMP_REJECTS = max(1, args.filter_max_jump_rejects)
     display_marker_pairs = NormalizeMarkerPairs(args.display_pair)
 
     mqtt_marker_pairs = args.mqtt_marker_pair or []

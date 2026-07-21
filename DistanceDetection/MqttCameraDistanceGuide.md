@@ -154,14 +154,21 @@ Example payload:
   "raw_distance_m": 0.91,
   "dx_m": 0.34,
   "dy_m": -0.71,
+  "source_world_x_m": 1.24,
+  "source_world_y_m": 0.42,
+  "source_frontier_distance_m": 0.42,
+  "source_frontier_side": "top",
   "pixel_distance": 312.4,
   "dx_pixels": 240,
   "dy_pixels": -199,
   "calibrated": true,
   "filtered": true,
+  "filter_reset": false,
+  "filter_rejected_jump_count": 0,
   "filter_window": 5,
   "filter_alpha": 0.35,
   "filter_max_jump_m": 0.5,
+  "filter_max_jump_rejects": 3,
   "measurement_timestamp": 1784343103.05
 }
 ```
@@ -217,7 +224,9 @@ The detector publishes both raw and stabilized values.
 `raw_distance_m` is the newest unfiltered camera measurement.
 
 `distance_m` is the stabilized value after rolling median, exponential
-smoothing, and large-jump rejection.
+smoothing, and large-jump rejection. Consecutive large jumps are treated as a
+real robot/camera/marker movement and reset the filter to the new measurement,
+so the stable value does not stay stuck on the old position.
 
 Tune stabilization at startup:
 
@@ -228,7 +237,8 @@ python3 /Platooning-project/DistanceDetection/DistanceDetection.py \
   --mqtt-period 0.5 \
   --filter-window 5 \
   --filter-alpha 0.35 \
-  --filter-max-jump-m 0.50
+  --filter-max-jump-m 0.50 \
+  --filter-max-jump-rejects 3
 ```
 
 ## Field Notes
@@ -241,8 +251,18 @@ python3 /Platooning-project/DistanceDetection/DistanceDetection.py \
 
 `raw_distance_m` is the newest unfiltered distance converted to meters.
 
+`filter_reset` is `true` on the sample where the stabilizer accepted repeated
+large jumps as a real movement and re-anchored the stable value.
+
+`filter_rejected_jump_count` counts consecutive large jumps that are still
+being rejected as likely noise.
+
 `dx_m` and `dy_m` are the overhead world-plane vector from `source_marker` to
 `target_marker`, converted to meters.
+
+`source_frontier_distance_m` is the source marker's nearest distance to the
+calibrated floor rectangle boundary. `source_frontier_side` names that nearest
+calibration side.
 
 `pixel_distance`, `dx_pixels`, and `dy_pixels` are image-space diagnostics.
 

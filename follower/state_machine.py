@@ -40,6 +40,8 @@ class FollowerStateMachine:
         self.superintendent_target_marker = superintendent_target_marker
         self.superintendent_measurement: Optional[SuperintendentMeasurement] = None
         self.superintendent_measurement_timeout_s = 1.0
+        self.superintendent_unavailable_time = 0.0
+        self.superintendent_unavailable_timeout_s = 1.0
         self.global_visual_acquire_started_time = 0.0
 
         self.impl = implementation or FollowerRobotImplementation()
@@ -61,6 +63,9 @@ class FollowerStateMachine:
         self.current_target_color = assignment.initial_target_color
         self.final_target_ready = False
         self.local_lock_counter = 0
+        self.superintendent_measurement = None
+        self.superintendent_unavailable_time = 0.0
+        self.impl.clear_global_search_memory()
 
         self.publish_event(
             "ASSIGNMENT_RECEIVED",
@@ -88,6 +93,18 @@ class FollowerStateMachine:
             return
 
         self.superintendent_measurement = measurement
+        self.superintendent_unavailable_time = 0.0
+
+    def receive_superintendent_unavailable(
+        self,
+        source_marker: str,
+        target_marker: str,
+    ) -> None:
+        if not self.superintendent_marker_pair_matches(source_marker, target_marker):
+            return
+
+        self.superintendent_measurement = None
+        self.superintendent_unavailable_time = time.time()
 
     def receive_emergency_stop(self, reason: str = "unknown") -> None:
         self.publish_event("EMERGENCY_STOP_RECEIVED", {"reason": reason})
@@ -104,6 +121,7 @@ class FollowerStateMachine:
         self.current_target_color = None
         self.final_target_ready = False
         self.local_lock_counter = 0
+        self.impl.clear_global_search_memory()
         self.transition_to(State.WAIT_FOR_ASSIGNMENT)
 
     # =====================================================
@@ -170,6 +188,11 @@ class FollowerStateMachine:
 
                 self.impl.global_search_guided_motion(measurement)
             else:
+                if self.has_recent_superintendent_unavailable():
+                    if self.impl.global_search_return_motion():
+                        self.publish_event("GLOBAL_SEARCH_RETURNING_BY_MEMORY")
+                        return
+
                 self.impl.global_search_stop()
 
     def handle_global_visual_acquire(self) -> None:
@@ -369,15 +392,32 @@ class FollowerStateMachine:
         self,
         measurement: SuperintendentMeasurement,
     ) -> bool:
+        return self.superintendent_marker_pair_matches(
+            measurement.source_marker,
+            measurement.target_marker,
+        )
+
+    def superintendent_marker_pair_matches(
+        self,
+        source_marker: str,
+        target_marker: str,
+    ) -> bool:
         if self.superintendent_source_marker is None:
             return False
         if self.superintendent_target_marker is None:
             return False
 
         return (
-            measurement.source_marker == self.superintendent_source_marker
-            and measurement.target_marker == self.superintendent_target_marker
+            source_marker == self.superintendent_source_marker
+            and target_marker == self.superintendent_target_marker
         )
+
+    def has_recent_superintendent_unavailable(self) -> bool:
+        if self.superintendent_unavailable_time <= 0.0:
+            return False
+
+        age_s = time.time() - self.superintendent_unavailable_time
+        return age_s <= self.superintendent_unavailable_timeout_s
 
     def get_fresh_superintendent_measurement(
         self,
@@ -385,10 +425,6 @@ class FollowerStateMachine:
         if self.superintendent_measurement is None:
             return None
         if self.superintendent_measurement.distance_m is None:
-            return None
-        if self.superintendent_measurement.dx_m is None:
-            return None
-        if self.superintendent_measurement.dy_m is None:
             return None
 
         age_s = time.time() - self.superintendent_measurement.timestamp
