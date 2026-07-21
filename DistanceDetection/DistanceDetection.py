@@ -67,6 +67,14 @@ COLORS = {
     ],
 }
 
+COLOR_EXCLUSIONS = {
+    # Red sample from colorPicker.py (#7c1b3c):
+    # center [170, 199, 124], lower (162, 129, 54), upper (178, 255, 194).
+    "pink": [
+        ((162, 129, 54), (178, 255, 194)),
+    ],
+}
+
 DRAW_COLOR = (255, 255, 255)
 CALIBRATION_COLOR = (255, 0, 0)
 UNIT_TO_METERS = {
@@ -379,7 +387,7 @@ def ResizeForProcessing(frame):
     return cv2.resize(frame, (PROCESS_WIDTH, new_height), interpolation=cv2.INTER_AREA)
 
 
-def BuildColorMask(hsv, ranges):
+def BuildColorMask(hsv, ranges, excluded_ranges=None):
     mask_total = None
 
     for lower, upper in ranges:
@@ -388,14 +396,20 @@ def BuildColorMask(hsv, ranges):
         mask = cv2.inRange(hsv, lower, upper)
         mask_total = mask if mask_total is None else cv2.bitwise_or(mask_total, mask)
 
+    for lower, upper in excluded_ranges or []:
+        lower = np.array(lower, dtype=np.uint8)
+        upper = np.array(upper, dtype=np.uint8)
+        excluded_mask = cv2.inRange(hsv, lower, upper)
+        mask_total = cv2.bitwise_and(mask_total, cv2.bitwise_not(excluded_mask))
+
     kernel = np.ones((5, 5), np.uint8)
     mask_total = cv2.erode(mask_total, kernel, iterations=1)
     mask_total = cv2.dilate(mask_total, kernel, iterations=2)
     return mask_total
 
 
-def FindBlobCenters(hsv, ranges):
-    mask_total = BuildColorMask(hsv, ranges)
+def FindBlobCenters(hsv, ranges, excluded_ranges=None):
+    mask_total = BuildColorMask(hsv, ranges, excluded_ranges)
 
     contours, _ = cv2.findContours(
         mask_total,
@@ -420,8 +434,8 @@ def FindBlobCenters(hsv, ranges):
     return sorted(centers, key=lambda item: item[2], reverse=True)
 
 
-def FindBlobCenter(hsv, ranges):
-    centers = FindBlobCenters(hsv, ranges)
+def FindBlobCenter(hsv, ranges, excluded_ranges=None):
+    centers = FindBlobCenters(hsv, ranges, excluded_ranges)
     return centers[0] if centers else None
 
 
@@ -430,7 +444,7 @@ def DetectMarkerPositions(frame):
     positions = {}
 
     for color_name, ranges in COLORS.items():
-        result = FindBlobCenter(hsv, ranges)
+        result = FindBlobCenter(hsv, ranges, COLOR_EXCLUSIONS.get(color_name))
 
         if result is not None:
             cx, cy, area = result

@@ -38,6 +38,7 @@ def hex_to_opencv_hsv_range(hex_color, h_tol=8, s_tol=70, v_tol=70):
 center, lower, upper = hex_to_opencv_hsv_range("#507089") #azul claro
 # center, lower, upper = hex_to_opencv_hsv_range("#b4defe") # azul mas claro aun 
 # center, lower, upper = hex_to_opencv_hsv_range("#7b9cbc")
+center, lower, upper = hex_to_opencv_hsv_range("#7c1b3c") #Rojo a remover
 print("center:", center)
 print("lower:", lower)
 print("upper:", upper)
