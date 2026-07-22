@@ -13,7 +13,7 @@ Start the distance detector with the same marker pair the follower will use:
 ```bash
 python3 /Platooning-project/DistanceDetection/DistanceDetection.py \
   --mqtt-broker 10.0.7.51 \
-  --mqtt-marker-pair green:pink
+  --mqtt-marker-pair pink:green
 ```
 
 This publishes `GLOBAL_SEARCH_MARKER_DISTANCE` events to:
@@ -29,7 +29,6 @@ Start the follower with the overhead marker pair assigned to this robot:
 ```bash
 python3 /Platooning-project/run_follower.py \
   --lock-tilt \
-  --enable-imu-search \
   --robot-id Hexapod1 \
   --broker 10.0.7.51 \
   --superintendent-source-marker pink \
@@ -42,10 +41,35 @@ robot.
 `--superintendent-target-marker` is the overhead marker this robot should move
 toward during `GLOBAL_SEARCH`.
 
-For the example above, `Hexapod1` has the `green` overhead marker and should
-move toward the `pink` overhead marker.
+For the example above, `Hexapod1` has the `pink` overhead marker and should
+move toward the `green` overhead marker.
 
 Both options must be passed together.
+
+### Grid Search Approach
+
+The follower uses the overhead camera deltas directly during the
+Superintendent-guided approach/search phase. This is the recommended run mode:
+
+```bash
+cd /Platooning-project
+
+python3 -u run_follower.py \
+  --robot-id Hexapod1 \
+  --broker 10.0.7.51 \
+  --lock-tilt \
+  --superintendent-source-marker pink \
+  --superintendent-target-marker green
+```
+
+Run this on the Raspberry Pi attached to the Freenove hexapod, not on a laptop.
+Keep `DistanceDetection.py` running with the same marker pair, because the
+follower needs Superintendent `GLOBAL_SEARCH_MARKER_DISTANCE` messages for
+distance and world-position feedback.
+
+When both `dx_m` and `dy_m` are outside the deadzone, the follower alternates
+one axis per command. That makes a staircase path instead of commanding true
+diagonal motion.
 
 ## Consumed Messages
 
@@ -71,13 +95,8 @@ The robot uses `distance_m`, `dx_m`, and `dy_m` from the payload.
 `dx_m` and `dy_m` are the overhead world-plane vector from the source marker to
 the target marker.
 
-If the follower is started with `--enable-imu-search`, overhead search rotations
-use IMU yaw instead of fixed rotate timing. During clean forward-only overhead
-search probes, the follower also uses `source_world_x_m` and `source_world_y_m`
-to recalibrate the IMU heading reference after the source marker has moved far
-enough. This calibration is reset whenever the robot stops, backs up, turns, or
-hits frontier avoidance, so sideways or curved motion is not treated as body
-heading.
+The follower uses only the overhead marker deltas during Superintendent
+guidance.
 
 ## State Behavior
 
@@ -106,7 +125,7 @@ camera approach.
 It is entered from `GLOBAL_SEARCH` when:
 
 ```text
-Superintendent distance_m <= 0.80
+Superintendent distance_m <= 0.64
 ```
 
 Inside this state the robot:
@@ -122,8 +141,7 @@ It exits back to `GLOBAL_SEARCH` when:
 
 ```text
 Superintendent measurement is stale
-Superintendent distance_m > 1.10
-visual acquisition takes longer than 8 seconds
+visual acquisition takes longer than 20 seconds
 ```
 
 The Superintendent does not directly trigger `GLOBAL_APPROACH`; onboard blob

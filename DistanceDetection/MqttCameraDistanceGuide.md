@@ -154,10 +154,6 @@ Example payload:
   "raw_distance_m": 0.91,
   "dx_m": 0.34,
   "dy_m": -0.71,
-  "source_world_x_m": 1.24,
-  "source_world_y_m": 0.42,
-  "source_frontier_distance_m": 0.42,
-  "source_frontier_side": "top",
   "pixel_distance": 312.4,
   "dx_pixels": 240,
   "dy_pixels": -199,
@@ -259,10 +255,6 @@ being rejected as likely noise.
 
 `dx_m` and `dy_m` are the overhead world-plane vector from `source_marker` to
 `target_marker`, converted to meters.
-
-`source_frontier_distance_m` is the source marker's nearest distance to the
-calibrated floor rectangle boundary. `source_frontier_side` names that nearest
-calibration side.
 
 `pixel_distance`, `dx_pixels`, and `dy_pixels` are image-space diagnostics.
 

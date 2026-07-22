@@ -103,14 +103,8 @@ class FollowerMqttHandler:
                 dx_m=self.optional_float(data.get("dx_m")),
                 dy_m=self.optional_float(data.get("dy_m")),
                 timestamp=time.time(),
-                source_world_x_m=self.optional_float(data.get("source_world_x_m")),
-                source_world_y_m=self.optional_float(data.get("source_world_y_m")),
                 calibrated=bool(data.get("calibrated", False)),
                 filtered=bool(data.get("filtered", False)),
-                source_frontier_distance_m=self.optional_float(
-                    data.get("source_frontier_distance_m")
-                ),
-                source_frontier_side=data.get("source_frontier_side"),
             )
         except (KeyError, TypeError, ValueError) as error:
             print("[MQTT] invalid Superintendent distance event:", error)

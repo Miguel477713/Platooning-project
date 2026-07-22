@@ -6,8 +6,7 @@ from follower.publisher import NullFollowerPublisher
 from follower.robot_implementation import FollowerRobotImplementation
 
 
-SUPERINTENDENT_ACQUIRE_RANGE_M = 0.80
-SUPERINTENDENT_ACQUIRE_EXIT_RANGE_M = 1.10
+SUPERINTENDENT_ACQUIRE_RANGE_M = 0.64
 GLOBAL_VISUAL_ACQUIRE_TIMEOUT_S = 20.0
 
 
@@ -208,19 +207,6 @@ class FollowerStateMachine:
         if measurement is None:
             self.impl.stop_motors()
             self.publish_event("SUPERINTENDENT_MEASUREMENT_STALE")
-            self.transition_to(State.GLOBAL_SEARCH)
-            return
-
-        if measurement.distance_m > SUPERINTENDENT_ACQUIRE_EXIT_RANGE_M:
-            self.impl.stop_motors()
-            self.publish_event(
-                "SUPERINTENDENT_ACQUIRE_RANGE_EXITED",
-                {
-                    "source_marker": measurement.source_marker,
-                    "target_marker": measurement.target_marker,
-                    "distance_m": measurement.distance_m,
-                },
-            )
             self.transition_to(State.GLOBAL_SEARCH)
             return
 

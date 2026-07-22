@@ -97,7 +97,7 @@ camera approach.
 It is entered from `GLOBAL_SEARCH` when:
 
 ```text
-Superintendent distance_m <= 0.80
+Superintendent distance_m <= 0.64
 ```
 
 Inside this state the robot:
@@ -113,8 +113,7 @@ It exits back to `GLOBAL_SEARCH` when:
 
 ```text
 Superintendent measurement is stale
-Superintendent distance_m > 1.10
-visual acquisition takes longer than 8 seconds
+visual acquisition takes longer than 20 seconds
 ```
 
 The Superintendent does not directly trigger `GLOBAL_APPROACH`; onboard blob

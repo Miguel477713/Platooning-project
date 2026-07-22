@@ -57,12 +57,8 @@ class SuperintendentMeasurement:
     dx_m: Optional[float]
     dy_m: Optional[float]
     timestamp: float
-    source_world_x_m: Optional[float] = None
-    source_world_y_m: Optional[float] = None
     calibrated: bool = False
     filtered: bool = False
-    source_frontier_distance_m: Optional[float] = None
-    source_frontier_side: Optional[str] = None
 
 
 @dataclass

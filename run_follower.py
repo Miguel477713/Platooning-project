@@ -71,11 +71,6 @@ def main() -> None:
     parser.add_argument("--tilt-max", type=int, default=TILT_MAX, help="Maximum camera tilt offset.")
     parser.add_argument("--camera-only", action="store_true", help="Track with camera but do not walk.")
     parser.add_argument("--show-video", action="store_true", help="Show direct camera debug window.")
-    parser.add_argument(
-        "--enable-imu-search",
-        action="store_true",
-        help="Use IMU yaw for overhead search rotations and calibrate yaw from overhead forward motion.",
-    )
     parser.add_argument("--invert-pan", action="store_true", help="Invert pan correction.")
     parser.add_argument("--invert-tilt", action="store_true", help="Invert tilt correction.")
     parser.add_argument("--lock-tilt", action="store_true", help="Keep vertical camera servo fixed.")
@@ -158,7 +153,6 @@ def main() -> None:
             occluded_target_area_max=args.occluded_target_area_max,
             occlusion_dark_ratio=args.occlusion_dark_ratio,
             show_video=args.show_video,
-            enable_imu_search=args.enable_imu_search,
         )
     robot = FollowerStateMachine(
         robot_id=args.robot_id,

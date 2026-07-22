@@ -104,25 +104,11 @@ def WorldPositionPayload(world_position, active_calibration):
         return None
 
     x_world, y_world = world_position
-    width = active_calibration.width
-    height = active_calibration.height
     unit = active_calibration.unit
-    frontier_distances = {
-        "left": x_world,
-        "right": width - x_world,
-        "top": y_world,
-        "bottom": height - y_world,
-    }
-    frontier_side, frontier_distance = min(
-        frontier_distances.items(),
-        key=lambda item: item[1],
-    )
 
     return {
         "world_x_m": DistanceToMeters(x_world, unit),
         "world_y_m": DistanceToMeters(y_world, unit),
-        "frontier_distance_m": DistanceToMeters(frontier_distance, unit),
-        "frontier_side": frontier_side,
     }
 
 
@@ -707,7 +693,6 @@ def BuildDistanceEventPayload(robot_id, marker_a, marker_b):
         }
 
     measurement = snapshot["distances"].get(MeasurementKey(marker_a, marker_b))
-    source_world_position = snapshot.get("world_positions", {}).get(marker_a, {})
     if measurement is None:
         return {
             "type": "EVENT",
@@ -739,10 +724,6 @@ def BuildDistanceEventPayload(robot_id, marker_a, marker_b):
         "dy_pixels": measurement.get("dy_pixels"),
         "dx_m": measurement.get("dx_m"),
         "dy_m": measurement.get("dy_m"),
-        "source_world_x_m": source_world_position.get("world_x_m"),
-        "source_world_y_m": source_world_position.get("world_y_m"),
-        "source_frontier_distance_m": source_world_position.get("frontier_distance_m"),
-        "source_frontier_side": source_world_position.get("frontier_side"),
         "calibrated": snapshot["calibrated"],
         "filtered": measurement.get("filtered", False),
         "filter_reset": measurement.get("filter_reset", False),
