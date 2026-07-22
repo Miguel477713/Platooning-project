@@ -6,8 +6,8 @@ from follower.publisher import NullFollowerPublisher
 from follower.robot_implementation import FollowerRobotImplementation
 
 
-SUPERINTENDENT_ACQUIRE_RANGE_M = 0.64
-GLOBAL_VISUAL_ACQUIRE_TIMEOUT_S = 20.0
+SUPERINTENDENT_ACQUIRE_RANGE_M = 1.10
+GLOBAL_VISUAL_ACQUIRE_TIMEOUT_S = 35.0
 
 
 class FollowerStateMachine:
@@ -440,6 +440,7 @@ class FollowerStateMachine:
             "current_target_color": self.current_target_color,
             "superintendent_source_marker": self.superintendent_source_marker,
             "superintendent_target_marker": self.superintendent_target_marker,
+            "action_status": getattr(self.impl, "action_status", None),
             "timestamp": time.time(),
         }
 

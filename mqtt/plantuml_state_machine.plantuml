@@ -13,7 +13,7 @@ GLOBAL_SEARCH : global_detect(current_target_color)
 GLOBAL_SEARCH : if not detected and Superintendent far -> global_search_guided_motion()
 GLOBAL_SEARCH : if not detected and no Superintendent -> global_search_stop()
 GLOBAL_SEARCH --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
-GLOBAL_SEARCH --> GLOBAL_VISUAL_ACQUIRE : target not detected\nand Superintendent distance <= 0.64m\npublish SUPERINTENDENT_ACQUIRE_RANGE_REACHED
+GLOBAL_SEARCH --> GLOBAL_VISUAL_ACQUIRE : target not detected\nand Superintendent distance <= 1.10m\npublish SUPERINTENDENT_ACQUIRE_RANGE_REACHED
 GLOBAL_SEARCH --> GLOBAL_SEARCH : target not detected
 
 GLOBAL_VISUAL_ACQUIRE : global_detect(current_target_color)
@@ -23,7 +23,7 @@ GLOBAL_VISUAL_ACQUIRE : small Superintendent-guided creep moves
 GLOBAL_VISUAL_ACQUIRE : stop between rotate/creep moves to settle image
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : Superintendent stale
-GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : timeout after 20s\npublish GLOBAL_VISUAL_ACQUIRE_TIMEOUT
+GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : timeout after 35s\npublish GLOBAL_VISUAL_ACQUIRE_TIMEOUT
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_VISUAL_ACQUIRE : target not detected\ncontinue acquire
 
 GLOBAL_APPROACH : global_detect(current_target_color)

@@ -23,7 +23,7 @@ PAN_STEP_GAIN = 6
 TILT_STEP_GAIN = 3
 MAX_PAN_STEP = 4
 MAX_TILT_STEP = 1
-MOVE_SPEED = 6
+MOVE_SPEED = 7
 SPEED_MIN = 2
 SPEED_MAX = 10
 MOVE_FORWARD_Y = 12
@@ -32,6 +32,9 @@ OVERHEAD_MOVE_GAIN = 8
 OVERHEAD_MAX_STEP = 8
 OVERHEAD_AXIS_DEADZONE_M = 0.08
 OVERHEAD_CLOSE_DISTANCE_M = 0.40
+OVERHEAD_DIRECTION_LEARN_DELTA_M = 0.02
+OVERHEAD_DIRECTION_LEARN_MIN_STEP = 6
+OVERHEAD_DIRECTION_LEARN_OBSERVE_S = 5.00
 VISUAL_ACQUIRE_MOVE_GAIN = 5
 VISUAL_ACQUIRE_MAX_STEP = 4
 VISUAL_ACQUIRE_MOVE_INTERVAL = 0.35
@@ -78,6 +81,13 @@ def clamp(value, minimum, maximum):
 def signed_step(value, gain, max_step):
     step = int(round(abs(value) * gain))
     step = clamp(step, 1, max_step)
+    return step if value > 0 else -step
+
+
+def overhead_axis_step(value, gain, max_step, learned):
+    step = int(round(abs(value) * gain))
+    min_step = 1 if learned else min(OVERHEAD_DIRECTION_LEARN_MIN_STEP, max_step)
+    step = clamp(step, min_step, max_step)
     return step if value > 0 else -step
 
 
@@ -221,6 +231,9 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.global_search_move_history = []
         self.last_global_search_return_move = 0.0
         self.overhead_last_grid_axis = "y"
+        self.overhead_axis_sign = {"x": 1, "y": 1}
+        self.overhead_axis_learned = {"x": False, "y": False}
+        self.overhead_axis_probe = None
 
         self.server_dir = self._prepare_freenove_imports()
         self.control = None
@@ -474,6 +487,8 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         x, y = self.overhead_grid_step(
             dx_m,
             dy_m,
+            distance_m=distance_m,
+            measurement_timestamp=measurement.timestamp,
             gain=OVERHEAD_MOVE_GAIN,
             max_step=OVERHEAD_MAX_STEP,
         )
@@ -532,6 +547,8 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         x, y = self.overhead_grid_step(
             dx_m,
             dy_m,
+            distance_m=distance_m,
+            measurement_timestamp=measurement.timestamp,
             gain=VISUAL_ACQUIRE_MOVE_GAIN,
             max_step=VISUAL_ACQUIRE_MAX_STEP,
         )
@@ -547,7 +564,16 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.send_move_xy(x, y, 0)
         self.remember_global_search_move(x, y, 0)
 
-    def overhead_grid_step(self, dx_m, dy_m, *, gain, max_step):
+    def overhead_grid_step(self, dx_m, dy_m, *, distance_m, measurement_timestamp, gain, max_step):
+        self.update_overhead_direction_learning(dx_m, dy_m, distance_m, measurement_timestamp)
+        if self.overhead_axis_probe is not None:
+            axis = self.overhead_axis_probe["axis"]
+            if self.overhead_probe_active():
+                self.action_status = f"overhead-{axis}-learn-probe"
+            else:
+                self.action_status = f"overhead-{axis}-learn-wait"
+            return self.overhead_probe_motion()
+
         x_ready = abs(dx_m) > OVERHEAD_AXIS_DEADZONE_M
         y_ready = abs(dy_m) > OVERHEAD_AXIS_DEADZONE_M
 
@@ -561,11 +587,74 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
 
         self.overhead_last_grid_axis = axis
         if axis == "x":
-            x = clamp(int(round(dx_m * gain)), -max_step, max_step)
+            raw_x = overhead_axis_step(
+                dx_m, gain, max_step, self.overhead_axis_learned["x"]
+            )
+            x = raw_x * self.overhead_axis_sign["x"]
+            self.start_overhead_direction_probe("x", dx_m, distance_m, measurement_timestamp, x)
             return x, 0
 
-        y = clamp(int(round(dy_m * gain)), -max_step, max_step)
+        raw_y = overhead_axis_step(
+            dy_m, gain, max_step, self.overhead_axis_learned["y"]
+        )
+        y = raw_y * self.overhead_axis_sign["y"]
+        self.start_overhead_direction_probe("y", dy_m, distance_m, measurement_timestamp, y)
         return 0, y
+
+    def overhead_probe_motion(self):
+        if not self.overhead_probe_active():
+            return 0, 0
+
+        axis = self.overhead_axis_probe["axis"]
+        command = self.overhead_axis_probe["command"]
+        if axis == "x":
+            return command, 0
+        return 0, command
+
+    def overhead_probe_active(self):
+        elapsed_s = time.time() - self.overhead_axis_probe["start_time"]
+        return elapsed_s < OVERHEAD_DIRECTION_LEARN_OBSERVE_S
+
+    def start_overhead_direction_probe(
+        self, axis, error_m, distance_m, measurement_timestamp, command
+    ) -> None:
+        if self.overhead_axis_learned[axis] or self.overhead_axis_probe is not None or command == 0:
+            return
+
+        self.overhead_axis_probe = {
+            "axis": axis,
+            "error_m": error_m,
+            "distance_m": distance_m,
+            "timestamp": measurement_timestamp,
+            "command": command,
+            "start_time": time.time(),
+        }
+        self.action_status = f"overhead-{axis}-learn-probe"
+
+    def update_overhead_direction_learning(self, dx_m, dy_m, distance_m, measurement_timestamp) -> None:
+        if self.overhead_axis_probe is None:
+            return
+        axis = self.overhead_axis_probe["axis"]
+        if self.overhead_axis_learned[axis]:
+            self.overhead_axis_probe = None
+            return
+        if time.time() - self.overhead_axis_probe["start_time"] < OVERHEAD_DIRECTION_LEARN_OBSERVE_S:
+            return
+        if measurement_timestamp <= self.overhead_axis_probe["timestamp"]:
+            return
+
+        before_error = abs(self.overhead_axis_probe["error_m"])
+        after_error = abs(dx_m if axis == "x" else dy_m)
+        before_distance = self.overhead_axis_probe["distance_m"]
+
+        axis_error_worse = after_error > before_error + OVERHEAD_DIRECTION_LEARN_DELTA_M
+        distance_worse = distance_m > before_distance + OVERHEAD_DIRECTION_LEARN_DELTA_M
+
+        if axis_error_worse or distance_worse:
+            self.overhead_axis_sign[axis] *= -1
+
+        self.overhead_axis_learned[axis] = True
+        self.overhead_axis_probe = None
 
     def remember_global_search_move(self, x, y, angle=0):
         if x == 0 and y == 0 and angle == 0:
@@ -614,6 +703,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
 
     def clear_overhead_feedback(self) -> None:
         self.overhead_last_grid_axis = "y"
+        self.overhead_axis_probe = None
 
     def visual_acquire_camera_sweep(self):
         self.pan_angle += self.visual_acquire_pan_direction * VISUAL_ACQUIRE_PAN_STEP

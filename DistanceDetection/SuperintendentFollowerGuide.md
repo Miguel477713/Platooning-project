@@ -71,6 +71,14 @@ When both `dx_m` and `dy_m` are outside the deadzone, the follower alternates
 one axis per command. That makes a staircase path instead of commanding true
 diagonal motion.
 
+The first overhead-guided command on each axis is also used as a direction
+probe. On the next fresh Superintendent measurement, the follower compares the
+new axis error against the previous one; if the error or total distance
+increased, it flips that axis command sign and keeps the learned direction for
+the rest of the run. Direction probes use a larger minimum step and keep moving
+for 5 seconds before judging the new measurement so camera latency and very
+small movements do not cause a false result.
+
 ## Consumed Messages
 
 The follower listens to:
@@ -125,7 +133,7 @@ camera approach.
 It is entered from `GLOBAL_SEARCH` when:
 
 ```text
-Superintendent distance_m <= 0.64
+Superintendent distance_m <= 1.10
 ```
 
 Inside this state the robot:
@@ -141,7 +149,7 @@ It exits back to `GLOBAL_SEARCH` when:
 
 ```text
 Superintendent measurement is stale
-visual acquisition takes longer than 20 seconds
+visual acquisition takes longer than 35 seconds
 ```
 
 The Superintendent does not directly trigger `GLOBAL_APPROACH`; onboard blob
