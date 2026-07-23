@@ -35,8 +35,6 @@ OVERHEAD_CLOSE_DISTANCE_M = 0.40
 OVERHEAD_DIRECTION_LEARN_DELTA_M = 0.02
 OVERHEAD_DIRECTION_LEARN_MIN_STEP = 6
 OVERHEAD_DIRECTION_LEARN_OBSERVE_S = 5.00
-VISUAL_ACQUIRE_MOVE_GAIN = 5
-VISUAL_ACQUIRE_MAX_STEP = 4
 VISUAL_ACQUIRE_MOVE_INTERVAL = 0.35
 VISUAL_ACQUIRE_PAN_STEP = 2
 VISUAL_ACQUIRE_ROTATE_PAN_THRESHOLD = 26
@@ -511,15 +509,6 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
 
         self.visual_acquire_camera_sweep()
 
-        distance_m = measurement.distance_m
-        dx_m = measurement.dx_m
-        dy_m = measurement.dy_m
-
-        if distance_m is None or dx_m is None or dy_m is None:
-            self.action_status = "visual-acquire-missing"
-            self.stop_motors()
-            return
-
         distance_cm = self.request_ultrasonic_distance()
         if distance_cm is not None and distance_cm < OBSTACLE_MIN_CM:
             self.action_status = "visual-acquire-obstacle-back"
@@ -539,30 +528,8 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
             self.send_move_xy(0, 0, turn)
             return
 
-        if distance_m <= OVERHEAD_CLOSE_DISTANCE_M:
-            self.action_status = "visual-acquire-hold"
-            self.stop_motors()
-            return
-
-        x, y = self.overhead_grid_step(
-            dx_m,
-            dy_m,
-            distance_m=distance_m,
-            measurement_timestamp=measurement.timestamp,
-            gain=VISUAL_ACQUIRE_MOVE_GAIN,
-            max_step=VISUAL_ACQUIRE_MAX_STEP,
-        )
-
-        self.last_visual_acquire_move = now
-
-        if x == 0 and y == 0:
-            self.action_status = "visual-acquire-hold"
-            self.stop_motors()
-            return
-
-        self.action_status = "visual-acquire-creep"
-        self.send_move_xy(x, y, 0)
-        self.remember_global_search_move(x, y, 0)
+        self.action_status = "visual-acquire-hold"
+        self.stop_motors()
 
     def overhead_grid_step(self, dx_m, dy_m, *, distance_m, measurement_timestamp, gain, max_step):
         self.update_overhead_direction_learning(dx_m, dy_m, distance_m, measurement_timestamp)

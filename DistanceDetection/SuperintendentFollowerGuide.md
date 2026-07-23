@@ -142,14 +142,21 @@ Inside this state the robot:
 2. Transitions to `GLOBAL_APPROACH` as soon as the blob is visible.
 3. Sweeps the camera left/right if the blob is not visible.
 4. Rotates the body slowly in place when the camera pan is near its limit.
-5. Otherwise uses small Superintendent-guided creep moves.
-6. Stops between rotate/creep moves to let the camera image settle.
+5. Otherwise holds position while continuing camera acquisition.
+6. Stops between rotate attempts to let the camera image settle.
+
+The camera pan is not reset when entering `GLOBAL_VISUAL_ACQUIRE`. The sweep
+continues from the current `pan_angle` and current sweep direction. From a
+centered camera with the default direction, it pans toward the positive side
+first, reverses at `pan_max`, sweeps across to `-pan_max`, then repeats until
+the blob is detected, the Superintendent measurement goes stale, or the visual
+acquire timeout is reached.
 
 It exits back to `GLOBAL_SEARCH` when:
 
 ```text
 Superintendent measurement is stale
-visual acquisition takes longer than 35 seconds
+visual acquisition takes longer than 60 seconds
 ```
 
 The Superintendent does not directly trigger `GLOBAL_APPROACH`; onboard blob

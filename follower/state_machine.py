@@ -7,7 +7,7 @@ from follower.robot_implementation import FollowerRobotImplementation
 
 
 SUPERINTENDENT_ACQUIRE_RANGE_M = 1.10
-GLOBAL_VISUAL_ACQUIRE_TIMEOUT_S = 35.0
+GLOBAL_VISUAL_ACQUIRE_TIMEOUT_S = 60.0
 
 
 class FollowerStateMachine:

@@ -147,24 +147,10 @@ Example payload:
   "timestamp": 1784343103.09,
   "source_marker": "green",
   "target_marker": "pink",
-  "distance": 82.0,
-  "raw_distance": 91.0,
-  "unit": "cm",
   "distance_m": 0.82,
   "raw_distance_m": 0.91,
   "dx_m": 0.34,
   "dy_m": -0.71,
-  "pixel_distance": 312.4,
-  "dx_pixels": 240,
-  "dy_pixels": -199,
-  "calibrated": true,
-  "filtered": true,
-  "filter_reset": false,
-  "filter_rejected_jump_count": 0,
-  "filter_window": 5,
-  "filter_alpha": 0.35,
-  "filter_max_jump_m": 0.5,
-  "filter_max_jump_rejects": 3,
   "measurement_timestamp": 1784343103.05
 }
 ```
@@ -239,27 +225,15 @@ python3 /Platooning-project/DistanceDetection/DistanceDetection.py \
 
 ## Field Notes
 
-`distance` is the stabilized distance in the calibration unit, such as `cm`.
-
 `distance_m` is the stabilized distance converted to meters.
 
-`raw_distance` is the newest unfiltered distance in the calibration unit.
-
 `raw_distance_m` is the newest unfiltered distance converted to meters.
-
-`filter_reset` is `true` on the sample where the stabilizer accepted repeated
-large jumps as a real movement and re-anchored the stable value.
-
-`filter_rejected_jump_count` counts consecutive large jumps that are still
-being rejected as likely noise.
 
 `dx_m` and `dy_m` are the overhead world-plane vector from `source_marker` to
 `target_marker`, converted to meters.
 
-`pixel_distance`, `dx_pixels`, and `dy_pixels` are image-space diagnostics.
-
-`calibrated` should be `true` for real-world distance. If it is `false`, the
-camera can still detect marker positions, but real-world distance is not ready.
+`measurement_timestamp` is the source camera snapshot time used for the
+measurement. `timestamp` is when the MQTT event payload was built.
 
 ## Quick Checklist
 

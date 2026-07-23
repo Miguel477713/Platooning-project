@@ -19,11 +19,11 @@ GLOBAL_SEARCH --> GLOBAL_SEARCH : target not detected
 GLOBAL_VISUAL_ACQUIRE : global_detect(current_target_color)
 GLOBAL_VISUAL_ACQUIRE : pan camera left/right
 GLOBAL_VISUAL_ACQUIRE : if pan near limit -> rotate body in place
-GLOBAL_VISUAL_ACQUIRE : small Superintendent-guided creep moves
-GLOBAL_VISUAL_ACQUIRE : stop between rotate/creep moves to settle image
+GLOBAL_VISUAL_ACQUIRE : otherwise hold position
+GLOBAL_VISUAL_ACQUIRE : stop between rotate attempts to settle image
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : Superintendent stale
-GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : timeout after 35s\npublish GLOBAL_VISUAL_ACQUIRE_TIMEOUT
+GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : timeout after 60s\npublish GLOBAL_VISUAL_ACQUIRE_TIMEOUT
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_VISUAL_ACQUIRE : target not detected\ncontinue acquire
 
 GLOBAL_APPROACH : global_detect(current_target_color)
