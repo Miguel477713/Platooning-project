@@ -1,6 +1,6 @@
 # Distance Detection Guide
 
-This guide explains how `DistanceDetection2.py` measures the real-world
+This guide explains how `DistanceDetection.py` measures the real-world
 distance between pink and green objects. It uses four user-selected points on
 the video instead of searching for blue calibration markers.
 
@@ -24,13 +24,13 @@ On the Jetson itself, use `http://localhost:5000/`.
 Use the existing saved calibration:
 
 ```bash
-python3 /Platooning-project/DistanceDetection/DistanceDetection2.py
+python3 /Platooning-project/DistanceDetection/DistanceDetection.py
 ```
 
 Create a new calibration:
 
 ```bash
-python3 /Platooning-project/DistanceDetection/DistanceDetection2.py --calibrate
+python3 /Platooning-project/DistanceDetection/DistanceDetection.py --calibrate
 ```
 
 Use `--calibrate` whenever the camera, camera angle, or floor measurement
@@ -73,7 +73,7 @@ different location, set `CALIBRATION_FILE` before starting the program:
 
 ```bash
 CALIBRATION_FILE=/tmp/floor-calibration.json \
-python3 /Platooning-project/DistanceDetection/DistanceDetection2.py --calibrate
+python3 /Platooning-project/DistanceDetection/DistanceDetection.py --calibrate
 ```
 
 ## How Distance Is Calculated
@@ -126,7 +126,7 @@ Optional path for the saved click calibration. By default it is stored under
 ## Color Detection
 
 Pink and green objects are detected with HSV ranges defined in
-`DistanceDetection2.py`. Blue markers are not used by this script.
+`DistanceDetection.py`. Blue markers are not used by this script.
 
 Use `colorPicker.py` to inspect HSV values when the pink or green object is
 not detected reliably:
@@ -160,4 +160,4 @@ Pink or green is not detected:
 
 - Confirm the object is large enough for `MIN_AREA`.
 - Check the HSV values with `colorPicker.py`.
-- Adjust the pink or green HSV ranges in `DistanceDetection2.py`.
+- Adjust the pink or green HSV ranges in `DistanceDetection.py`.
