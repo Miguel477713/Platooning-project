@@ -403,33 +403,35 @@ def BuildColorMask(hsv, ranges):
         mask_total = mask if mask_total is None else cv2.bitwise_or(mask_total, mask)
 
     kernel = np.ones((5, 5), np.uint8)
-    mask_total = cv2.erode(mask_total, kernel, iterations=1)
+    # Close (dilate then erode) before anything else: a glossy/translucent
+    # marker's mask is often broken into fragments by a specular highlight,
+    # and eroding first (as this used to do) can wipe a small/far blob out
+    # completely before dilation ever gets a chance to recover it.
     mask_total = cv2.dilate(mask_total, kernel, iterations=2)
+    mask_total = cv2.erode(mask_total, kernel, iterations=2)
     return mask_total
 
 
 def FindBlobCenters(hsv, ranges):
     mask_total = BuildColorMask(hsv, ranges)
 
-    contours, _ = cv2.findContours(
-        mask_total,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE,
-    )
+    # contourArea approximates the area of the polygon traced around a blob's
+    # outline. For a small, glossy/translucent marker the mask is often an
+    # irregular or notched shape (a specular highlight can carve a bite out
+    # of it even after closing), and that polygon approximation can read
+    # noticeably lower than the number of pixels actually detected as the
+    # target color. connectedComponentsWithStats counts real pixels instead,
+    # which is what MIN_AREA is meant to be measuring.
+    num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(mask_total)
 
     centers = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
+    for label in range(1, num_labels):
+        area = stats[label, cv2.CC_STAT_AREA]
         if area < MIN_AREA:
             continue
 
-        moments = cv2.moments(contour)
-        if moments["m00"] == 0:
-            continue
-
-        cx = int(moments["m10"] / moments["m00"])
-        cy = int(moments["m01"] / moments["m00"])
-        centers.append((cx, cy, area))
+        cx, cy = centroids[label]
+        centers.append((int(cx), int(cy), int(area)))
 
     return sorted(centers, key=lambda item: item[2], reverse=True)
 

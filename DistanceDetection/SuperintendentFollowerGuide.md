@@ -27,7 +27,7 @@ platoon/robot/Superintendent/event
 Start the follower with the overhead marker pair assigned to this robot:
 
 ```bash
-python3 /Platooning-project/run_follower.py \
+sudo python3 /Platooning-project/run_follower.py \
   --lock-tilt \
   --robot-id Hexapod1 \
   --broker 10.0.7.51 \
@@ -54,7 +54,7 @@ Superintendent-guided approach/search phase. This is the recommended run mode:
 ```bash
 cd /Platooning-project
 
-python3 -u run_follower.py \
+sudo python3 -u run_follower.py \
   --robot-id Hexapod1 \
   --broker 10.0.7.51 \
   --lock-tilt \

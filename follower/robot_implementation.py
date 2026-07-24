@@ -137,6 +137,9 @@ class FollowerRobotImplementation:
     def clear_global_search_memory(self) -> None:
         pass
 
+    def enable_video(self) -> None:
+        pass
+
     def global_visual_acquire_motion(self, measurement: SuperintendentMeasurement) -> None:
         print(
             "[MOTOR] global visual acquire motion "
@@ -387,6 +390,14 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         }
         return True, target_x, target_y, relative_area, occluded, debug
 
+    def enable_video(self) -> None:
+        if self.show_video:
+            return
+        if not os.environ.get("DISPLAY"):
+            print("[VIDEO] no DISPLAY available, skipping debug window (SSH in with -X or use a local/VNC session)")
+            return
+        self.show_video = True
+
     def show_debug_frame(self, frame, debug, target_color: str, detected: bool, distance_m) -> None:
         if not self.show_video:
             return
@@ -426,8 +437,12 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
             mask_bgr = cv2.resize(mask_bgr, (width, height))
             annotated = np.hstack((annotated, mask_bgr))
 
-        cv2.imshow(self.video_window_name, annotated)
-        cv2.waitKey(1)
+        try:
+            cv2.imshow(self.video_window_name, annotated)
+            cv2.waitKey(1)
+        except cv2.error as exc:
+            self.show_video = False
+            print(f"[VIDEO] disabling debug window, cv2.imshow failed: {exc}")
 
     def detect_target_occlusion(self, frame, target_mask, x, y, w, h, relative_area):
         if relative_area > self.occluded_target_area_max:
@@ -691,8 +706,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         if abs(self.pan_angle) < pan_threshold:
             return 0
 
-        turn = -VISUAL_ACQUIRE_ROTATE_STEP if self.pan_angle > 0 else VISUAL_ACQUIRE_ROTATE_STEP
-        return turn
+        return self.search_direction * VISUAL_ACQUIRE_ROTATE_STEP
 
     def global_approach_motion(self, *, target_id: str, distance_m: float, goal_m: float) -> None:
         self.center_camera()
@@ -715,8 +729,10 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
             return
 
         if self.control is not None:
-            self.control.servo.set_servo_angle(0, int(servo_x))
-            self.control.servo.set_servo_angle(1, int(servo_y))
+            # Channels swapped: on this unit, servo channel 0 is wired to the
+            # vertical (tilt) axis and channel 1 to the horizontal (pan) axis.
+            self.control.servo.set_servo_angle(1, int(servo_x))
+            self.control.servo.set_servo_angle(0, int(servo_y))
         self.last_camera_command = now
         self.last_camera_x = int(servo_x)
         self.last_camera_y = int(servo_y)
