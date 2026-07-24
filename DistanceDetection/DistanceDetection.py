@@ -58,13 +58,25 @@ distance_filters_lock = threading.Lock()
 display_marker_pairs = None
 
 COLORS = {
-    # HSV ranges tuned from rosa.png (#e8428c) and verde.png (#679341).
+    # Bright pink marker (#e8428c) has HSV center [167, 182, 232].
+    # Requiring both high saturation and high value prevents burgundy/mauve
+    # clothing with a similar hue from being accepted as the marker.
     "pink": [
-        ((160, 100, 100), (175, 255, 255)),
+        ((160, 145, 200), (175, 255, 255)),
     ],
     "green": [
         ((38, 70, 70), (55, 255, 255)),
         ((38, 49, 87), (54, 189, 227))
+    ],
+}
+
+COLOR_EXCLUSIONS = {
+    # Dark false-positive sample (#7c1b3c), measured with colorPicker.py:
+    # center [170, 199, 124], lower (162, 129, 54), upper (178, 255, 194).
+    # Subtracting this range retains the brighter pink sample (#e8428c,
+    # center [167, 182, 232]) while rejecting similarly hued dark objects.
+    "pink": [
+        ((162, 129, 54), (178, 255, 194)),
     ],
 }
 
@@ -393,7 +405,7 @@ def ResizeForProcessing(frame):
     return cv2.resize(frame, (PROCESS_WIDTH, new_height), interpolation=cv2.INTER_AREA)
 
 
-def BuildColorMask(hsv, ranges):
+def BuildColorMask(hsv, ranges, excluded_ranges=None):
     mask_total = None
 
     for lower, upper in ranges:
@@ -401,6 +413,12 @@ def BuildColorMask(hsv, ranges):
         upper = np.array(upper, dtype=np.uint8)
         mask = cv2.inRange(hsv, lower, upper)
         mask_total = mask if mask_total is None else cv2.bitwise_or(mask_total, mask)
+
+    for lower, upper in excluded_ranges or []:
+        lower = np.array(lower, dtype=np.uint8)
+        upper = np.array(upper, dtype=np.uint8)
+        excluded_mask = cv2.inRange(hsv, lower, upper)
+        mask_total = cv2.bitwise_and(mask_total, cv2.bitwise_not(excluded_mask))
 
     kernel = np.ones((5, 5), np.uint8)
     # Close (dilate then erode) before anything else: a glossy/translucent
@@ -412,8 +430,8 @@ def BuildColorMask(hsv, ranges):
     return mask_total
 
 
-def FindBlobCenters(hsv, ranges):
-    mask_total = BuildColorMask(hsv, ranges)
+def FindBlobCenters(hsv, ranges, excluded_ranges=None):
+    mask_total = BuildColorMask(hsv, ranges, excluded_ranges)
 
     # contourArea approximates the area of the polygon traced around a blob's
     # outline. For a small, glossy/translucent marker the mask is often an
@@ -436,8 +454,8 @@ def FindBlobCenters(hsv, ranges):
     return sorted(centers, key=lambda item: item[2], reverse=True)
 
 
-def FindBlobCenter(hsv, ranges):
-    centers = FindBlobCenters(hsv, ranges)
+def FindBlobCenter(hsv, ranges, excluded_ranges=None):
+    centers = FindBlobCenters(hsv, ranges, excluded_ranges)
     return centers[0] if centers else None
 
 
@@ -446,7 +464,7 @@ def DetectMarkerPositions(frame):
     positions = {}
 
     for color_name, ranges in COLORS.items():
-        result = FindBlobCenter(hsv, ranges)
+        result = FindBlobCenter(hsv, ranges, COLOR_EXCLUSIONS.get(color_name))
 
         if result is not None:
             cx, cy, area = result
