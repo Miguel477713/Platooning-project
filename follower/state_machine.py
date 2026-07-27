@@ -306,6 +306,15 @@ class FollowerStateMachine:
                     "confidence": result.confidence,
                 },
             )
+            self.publish_event(
+                "READY",
+                {
+                    "target_id": self.current_target_id,
+                    "reason": "local_lock_acquired",
+                    "distance_m": result.distance_m,
+                    "confidence": result.confidence,
+                },
+            )
             self.transition_to(State.LOCAL_FOLLOW)
 
     def handle_local_follow(self) -> None:

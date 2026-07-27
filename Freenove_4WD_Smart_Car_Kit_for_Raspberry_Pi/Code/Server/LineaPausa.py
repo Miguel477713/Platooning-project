@@ -1,10 +1,17 @@
+import argparse
+import sys
 import time
-import threading
+from pathlib import Path
 from motor import Ordinary_Car
 from infrared import Infrared
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
 class SeguidorDiferencialPID:
-    def __init__(self):
+    def __init__(self, ready_signal=None, habilitar_sincronizacion=True):
         # --- CONSTANTES PID (Llantas Normales) ---
         # Las llantas normales tienen mucha más fricción al girar que las Mecanum.
         self.Kp = 300.0  
@@ -16,11 +23,11 @@ class SeguidorDiferencialPID:
         self.invertir_correccion = True 
         
         # ========================================================
-        # NUEVO: VARIABLES DE SINCRONIZACIÓN (PARO PERIÓDICO)
+        # NUEVO: VARIABLES DE SINCRONIZACIÓN CON SEÑAL DEL SEGUIDOR
         # ========================================================
-        self.habilitar_sincronizacion = True
+        self.habilitar_sincronizacion = habilitar_sincronizacion
         self.tiempo_marcha = 2.0  # Segundos que avanza antes de detenerse
-        self.tiempo_espera = 8.0  # Segundos que se detiene a esperar al otro robot
+        self.ready_signal = ready_signal
         
         self.en_espera = False
         self.reloj_sincronizacion = time.time()
@@ -83,14 +90,17 @@ class SeguidorDiferencialPID:
                 if (tiempo_actual - self.reloj_sincronizacion) > self.tiempo_marcha and error == 0:
                     self.en_espera = True
                     self.reloj_sincronizacion = tiempo_actual
+                    if self.ready_signal is not None:
+                        self.ready_signal.clear()
                     print("--- PARO DE SINCRONIZACIÓN: ESPERANDO AL SEGUNDO ROBOT ---")
                     return 0, 0, 0, 0 # Detiene los motores instantáneamente
             else:
-                # Si está detenido esperando...
-                if (tiempo_actual - self.reloj_sincronizacion) > self.tiempo_espera:
+                # Si está detenido esperando, solo reanuda con señal del seguidor.
+                signal = self.ready_signal.consume() if self.ready_signal is not None else None
+                if signal is not None:
                     self.en_espera = False
                     self.reloj_sincronizacion = tiempo_actual
-                    print("--- REANUDANDO MARCHA ---")
+                    print(f"--- REANUDANDO MARCHA: SEGUIDOR LISTO ({signal.get('event') or signal.get('state')}) ---")
                     
                     # Resetear variables Anti-Atasco para un arranque limpio
                     self.tiempo_ultimo_error = tiempo_actual
@@ -156,13 +166,41 @@ class SeguidorDiferencialPID:
         return FR, FL, BL, BR
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--broker", default="10.0.7.51", help="IP del broker MQTT.")
+    parser.add_argument("--port", type=int, default=1883, help="Puerto del broker MQTT.")
+    parser.add_argument(
+        "--follower-id",
+        default="Hexapod1",
+        help="robot_id del seguidor que debe enviar READY/LOCAL_LOCK_ACQUIRED.",
+    )
+    parser.add_argument(
+        "--no-mqtt-sync",
+        action="store_true",
+        help="Desactiva la sincronizacion MQTT; util para pruebas locales sin seguidor.",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    ready_signal = None
+    if not args.no_mqtt_sync:
+        from mqtt.leader_ready_signal import FollowerReadySignal
+
+        ready_signal = FollowerReadySignal(args.broker, args.port, args.follower_id)
+        ready_signal.start()
+
     motor = Ordinary_Car()
     infrared = Infrared()
-    pid_controller = SeguidorDiferencialPID()
+    pid_controller = SeguidorDiferencialPID(
+        ready_signal=ready_signal,
+        habilitar_sincronizacion=not args.no_mqtt_sync,
+    )
     num_muestras = 5
 
-    print("Iniciando control de precisión Diferencial con PARO PERIÓDICO...")
+    print("Iniciando control de precision Diferencial con sincronizacion por seguidor...")
     
     try:
         while True:
@@ -199,6 +237,8 @@ def main():
         motor.set_motor_model(0, 0, 0, 0)
         motor.close()
         infrared.close()
+        if ready_signal is not None:
+            ready_signal.stop()
 
 if __name__ == "__main__":
     main()
