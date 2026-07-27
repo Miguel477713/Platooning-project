@@ -15,6 +15,17 @@ class SeguidorDiferencialPID:
         self.velocidad_base = -800 
         self.invertir_correccion = True 
         
+        # ========================================================
+        # NUEVO: VARIABLES DE SINCRONIZACIÓN (PARO PERIÓDICO)
+        # ========================================================
+        self.habilitar_sincronizacion = True
+        self.tiempo_marcha = 2.0  # Segundos que avanza antes de detenerse
+        self.tiempo_espera = 8.0  # Segundos que se detiene a esperar al otro robot
+        
+        self.en_espera = False
+        self.reloj_sincronizacion = time.time()
+        # ========================================================
+        
         # Variables de memoria para el PID
         self.proporcional_pasado = 0
         self.integral = 0
@@ -61,22 +72,47 @@ class SeguidorDiferencialPID:
     def actualizar_cinematica(self, izq, cen, der):
         """Calcula la velocidad de cada rueda usando Control Diferencial"""
         error = self.leer_sensores_y_error(izq, cen, der)
+        tiempo_actual = time.time()
         
+        # ========================================================
+        # LÓGICA DE SINCRONIZACIÓN (MÁQUINA DE ESTADOS)
+        # ========================================================
+        if self.habilitar_sincronizacion:
+            if not self.en_espera:
+                # Si ya pasó el tiempo de marcha y está centrado en una recta (error 0)
+                if (tiempo_actual - self.reloj_sincronizacion) > self.tiempo_marcha and error == 0:
+                    self.en_espera = True
+                    self.reloj_sincronizacion = tiempo_actual
+                    print("--- PARO DE SINCRONIZACIÓN: ESPERANDO AL SEGUNDO ROBOT ---")
+                    return 0, 0, 0, 0 # Detiene los motores instantáneamente
+            else:
+                # Si está detenido esperando...
+                if (tiempo_actual - self.reloj_sincronizacion) > self.tiempo_espera:
+                    self.en_espera = False
+                    self.reloj_sincronizacion = tiempo_actual
+                    print("--- REANUDANDO MARCHA ---")
+                    
+                    # Resetear variables Anti-Atasco para un arranque limpio
+                    self.tiempo_ultimo_error = tiempo_actual
+                    self.error_anterior = error
+                    self.impulso_extra = 0
+                else:
+                    return 0, 0, 0, 0 # Continúa detenido
+        # ========================================================
+
         # 1. SISTEMA ANTI-ATASCO
-        # Como las llantas de goma rozan mucho al girar, si el coche se estanca 
-        # enviamos incrementos de potencia a la rotación.
         if error != 0 and abs(error) != 3: 
             if error == self.error_anterior:
-                if time.time() - self.tiempo_ultimo_error > 0.25:
+                if tiempo_actual - self.tiempo_ultimo_error > 0.25:
                     self.impulso_extra += 50  
                     if self.impulso_extra > 800: 
                         self.impulso_extra = 800
             else:
-                self.tiempo_ultimo_error = time.time()
+                self.tiempo_ultimo_error = tiempo_actual
                 self.error_anterior = error
                 self.impulso_extra = 0
         else:
-            self.tiempo_ultimo_error = time.time()
+            self.tiempo_ultimo_error = tiempo_actual
             self.error_anterior = error
             self.impulso_extra = 0
         
@@ -98,10 +134,10 @@ class SeguidorDiferencialPID:
             
             LY = self.velocidad_base
             if abs(error) == 2: 
-                # Frena drásticamente el avance (60% menos) para facilitar giros
+                # Frena drásticamente el avance (50% menos) para facilitar giros
                 LY = int(self.velocidad_base * 0.5) 
                 
-            # El PID ahora controla RX (Rotación) en lugar de un deslizamiento lateral
+            # El PID ahora controla RX (Rotación)
             RX_base = -int(salida_pid) if self.invertir_correccion else int(salida_pid)
             
             if RX_base > 0:
@@ -112,8 +148,6 @@ class SeguidorDiferencialPID:
                 RX = 0 
             
         # 3. MATRIZ DIFERENCIAL (Skid-Steer)
-        # Ya no hay variable LX. 
-        # Ruedas del mismo lado giran a la misma velocidad para rotar el chasis.
         FL = LY + RX
         BL = LY + RX
         FR = LY - RX
@@ -121,13 +155,14 @@ class SeguidorDiferencialPID:
         
         return FR, FL, BL, BR
 
+
 def main():
     motor = Ordinary_Car()
     infrared = Infrared()
     pid_controller = SeguidorDiferencialPID()
     num_muestras = 5
 
-    print("Iniciando control de precisión (Llantas Normales)...")
+    print("Iniciando control de precisión Diferencial con PARO PERIÓDICO...")
     
     try:
         while True:

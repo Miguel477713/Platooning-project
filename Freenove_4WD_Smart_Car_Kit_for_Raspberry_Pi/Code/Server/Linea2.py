@@ -6,11 +6,11 @@ from infrared import Infrared
 class SeguidorMecanumPID:
     def __init__(self):
         # Constantes del PID 
-        self.Kp = 260.0  
+        self.Kp = 150.0  
         self.Kd = 450.0  
         self.Ki = 0.0 
         
-        self.velocidad_base = -1000 
+        self.velocidad_base = -800 
         self.invertir_correccion = True 
         
         # Variables de memoria para el PID
@@ -43,7 +43,7 @@ class SeguidorMecanumPID:
         LY = 0 
         LX = 0 
 
-        fuerza_giro = 900
+        fuerza_giro = 800
         if error > 0:
             # Se salió por la izquierda, debe rotar a la derecha para recuperarla
             RX = fuerza_giro if self.invertir_correccion else -fuerza_giro
@@ -95,7 +95,7 @@ class SeguidorMecanumPID:
             
             # Reducimos la fuerza a 650-700 para evitar sobrecompensar y 
             # saltarnos la línea provocando el giro de 180 grados.
-            fuerza_giro = 650 
+            fuerza_giro = 800 
             
             if error > 0:
                 RX = fuerza_giro if self.invertir_correccion else -fuerza_giro
@@ -106,7 +106,7 @@ class SeguidorMecanumPID:
             
             LY = self.velocidad_base
             if abs(error) == 2: 
-                LY = int(self.velocidad_base * 0.8)
+                LY = int(self.velocidad_base * 0.6)
                 
             LX_base = -int(salida_pid) if self.invertir_correccion else int(salida_pid)
             
