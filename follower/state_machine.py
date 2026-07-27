@@ -9,6 +9,8 @@ from follower.robot_implementation import FollowerRobotImplementation
 SUPERINTENDENT_ACQUIRE_RANGE_M = 1.10
 GLOBAL_VISUAL_ACQUIRE_TIMEOUT_S = 60.0
 
+CAMERA_CONTROLLED_STATES = (State.GLOBAL_VISUAL_ACQUIRE, State.LOCAL_LOCK, State.LOCAL_FOLLOW)
+
 
 class FollowerStateMachine:
     """Pure follower state-machine logic.
@@ -337,8 +339,8 @@ class FollowerStateMachine:
             return False
 
         target_distance = self.get_current_approach_distance()
-        if result.distance_m is not None:
-            return result.distance_m <= target_distance
+        if result.distance_m is not None and result.distance_m <= target_distance:
+            return True
 
         target_area = getattr(result, "target_area", None)
         target_area_min = getattr(self.impl, "target_area_min", None)
@@ -428,6 +430,8 @@ class FollowerStateMachine:
         self.state = new_state
         if new_state == State.GLOBAL_VISUAL_ACQUIRE:
             self.global_visual_acquire_started_time = time.time()
+        if new_state in CAMERA_CONTROLLED_STATES and old_state not in CAMERA_CONTROLLED_STATES:
+            self.impl.enable_video()
         print(f"[STATE] {old_state.name} -> {new_state.name}")
         self.publish_status()
 
