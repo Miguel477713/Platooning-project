@@ -6,7 +6,8 @@ from mqtt.transport import PahoMqttTransport
 
 
 READY_EVENTS = {"READY", "LOCAL_LOCK_ACQUIRED", "WAIT_ZONE_REACHED"}
-READY_STATES = {"LOCAL_FOLLOW"}
+READY_STATES = set()
+READY_LOCAL_FOLLOW_ACTION_STATUSES = {"hold"}
 
 
 class FollowerReadySignal:
@@ -61,3 +62,15 @@ class FollowerReadySignal:
             self.last_signal = data
             self.ready.set()
             print("[MQTT] seguidor listo por estado:", data.get("state"))
+        elif (
+            message_type == "STATUS"
+            and data.get("state") == "LOCAL_FOLLOW"
+            and data.get("action_status") in READY_LOCAL_FOLLOW_ACTION_STATUSES
+        ):
+            self.last_signal = data
+            self.ready.set()
+            print(
+                "[MQTT] seguidor listo por espera:",
+                data.get("state"),
+                data.get("action_status"),
+            )

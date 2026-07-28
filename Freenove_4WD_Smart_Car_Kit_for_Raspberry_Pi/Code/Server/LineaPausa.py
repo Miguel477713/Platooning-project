@@ -29,7 +29,7 @@ class SeguidorDiferencialPID:
         self.tiempo_marcha = 2.0  # Segundos que avanza antes de detenerse
         self.ready_signal = ready_signal
         
-        self.en_espera = False
+        self.en_espera = habilitar_sincronizacion
         self.reloj_sincronizacion = time.time()
         # ========================================================
         

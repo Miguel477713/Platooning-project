@@ -42,10 +42,12 @@ LOCAL_LOCK : align with target
 LOCAL_LOCK : count stable frames
 LOCAL_LOCK --> LOST_TARGET : local target not detected
 LOCAL_LOCK --> LOCAL_LOCK : lock not stable yet
-LOCAL_LOCK --> LOCAL_FOLLOW : stable lock acquired\npublish LOCAL_LOCK_ACQUIRED
+LOCAL_LOCK --> LOCAL_FOLLOW : stable lock acquired\npublish LOCAL_LOCK_ACQUIRED\npublish READY
 
 LOCAL_FOLLOW : local_detect(current_target_color)
 LOCAL_FOLLOW : local_follow_motion(result)
+LOCAL_FOLLOW : publish STATUS every 1s
+LOCAL_FOLLOW : action_status=hold means stopped\nand ready for leader resume
 LOCAL_FOLLOW --> LOCAL_FOLLOW : target detected\ncontinue following
 LOCAL_FOLLOW --> LOST_TARGET : target lost\npublish TARGET_LOST_LOCAL
 

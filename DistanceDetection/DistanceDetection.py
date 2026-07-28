@@ -31,7 +31,7 @@ RTSP_URL = os.getenv(
     "rtsp://oliversina135:12345678@10.0.7.12:554/stream1"
 )
 
-MIN_AREA = int(os.getenv("MIN_AREA", "300"))
+MIN_AREA = int(os.getenv("MIN_AREA", "150"))
 TARGET_FPS = float(os.getenv("TARGET_FPS", "30"))
 PROCESS_WIDTH = int(os.getenv("PROCESS_WIDTH", "0"))  # 0 disables resize
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "95"))
