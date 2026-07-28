@@ -27,6 +27,7 @@ MOVE_SPEED = 7
 SPEED_MIN = 2
 SPEED_MAX = 10
 MOVE_FORWARD_Y = 12
+PARTIAL_TARGET_FORWARD_Y = 4
 MOVE_BACKWARD_Y = -10
 OVERHEAD_MOVE_GAIN = 8
 OVERHEAD_MAX_STEP = 8
@@ -38,7 +39,7 @@ OVERHEAD_DIRECTION_LEARN_OBSERVE_S = 5.00
 VISUAL_ACQUIRE_MOVE_INTERVAL = 0.35
 VISUAL_ACQUIRE_PAN_STEP = 2
 VISUAL_ACQUIRE_ROTATE_PAN_THRESHOLD = 26
-VISUAL_ACQUIRE_ROTATE_STEP = 3
+VISUAL_ACQUIRE_ROTATE_STEP = 5
 GLOBAL_SEARCH_RETURN_MOVE_INTERVAL = 0.35
 GLOBAL_SEARCH_MEMORY_MAX_STEPS = 100
 
@@ -61,7 +62,7 @@ COLOR_RANGES = {
         ((170, 100, 80), (180, 255, 255)),
     ],
     "green": [
-        ((35, 70, 60), (85, 255, 255)),
+        ((35, 60, 50), (90, 255, 255)),
     ],
     "blue": [
         ((90, 70, 60), (130, 255, 255)),
@@ -70,6 +71,30 @@ COLOR_RANGES = {
         ((20, 80, 80), (35, 255, 255)),
     ],
 }
+
+
+# Low-light handling. When the scene gets dim the target's saturation and value
+# both collapse, so a fixed HSV window stops matching. We equalise the V channel
+# on dark frames and, if that still finds nothing, retry with relaxed S/V floors.
+DIM_FRAME_V_MEAN = 110
+RELAXED_SAT_FLOOR = 35
+RELAXED_VAL_FLOOR = 25
+RELAXED_SAT_SCALE = 0.45
+RELAXED_VAL_SCALE = 0.40
+
+
+def relax_ranges(ranges):
+    """Loosen the saturation/value floors of an HSV range list for dim scenes."""
+    relaxed = []
+    for lower, upper in ranges:
+        h, s, v = lower
+        relaxed.append((
+            (h,
+             max(RELAXED_SAT_FLOOR, int(s * RELAXED_SAT_SCALE)),
+             max(RELAXED_VAL_FLOOR, int(v * RELAXED_VAL_SCALE))),
+            upper,
+        ))
+    return relaxed
 
 
 def clamp(value, minimum, maximum):
@@ -339,14 +364,9 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
             self.last_frame_time = time.time()
         return frame
 
-    def detect_target(self, frame, target_color: str):
-        if target_color not in COLOR_RANGES:
-            return False, 0.0, 0.0, 0.0, False, {"mask": None}
-
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    def build_color_mask(self, hsv, ranges):
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-
-        for lower, upper in COLOR_RANGES[target_color]:
+        for lower, upper in ranges:
             lower_bound = np.array(lower, dtype=np.uint8)
             upper_bound = np.array(upper, dtype=np.uint8)
             mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower_bound, upper_bound))
@@ -359,19 +379,50 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         kernel = np.ones((5, 5), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        return mask
 
+    def largest_target_contour(self, mask, frame_shape):
+        """Biggest blob in the mask, or (None, 0.0) if none is large enough."""
         contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours = contours[0] if len(contours) == 2 else contours[1]
         if len(contours) == 0:
-            return False, 0.0, 0.0, 0.0, False, {"mask": mask}
+            return None, 0.0
 
+        height, width = frame_shape
         contour = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(contour)
-        height, width = frame.shape[:2]
-        relative_area = area / float(width * height)
+        relative_area = cv2.contourArea(contour) / float(width * height)
         if relative_area < 0.002:
+            return None, 0.0
+        return contour, relative_area
+
+    def detect_target(self, frame, target_color: str):
+        if target_color not in COLOR_RANGES:
+            return False, 0.0, 0.0, 0.0, False, {"mask": None}
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # On dim frames, stretch the brightness channel so the target keeps the
+        # same hue/saturation signature it has under good light.
+        hue, sat, val = cv2.split(hsv)
+        if float(np.mean(val)) < DIM_FRAME_V_MEAN:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            hsv = cv2.merge((hue, sat, clahe.apply(val)))
+
+        ranges = COLOR_RANGES[target_color]
+        mask = self.build_color_mask(hsv, ranges)
+        contour, relative_area = self.largest_target_contour(mask, frame.shape[:2])
+
+        if contour is None:
+            # Still nothing: the scene is probably dark enough that saturation
+            # and value both dropped out of the nominal window.
+            relaxed_mask = self.build_color_mask(hsv, relax_ranges(ranges))
+            contour, relative_area = self.largest_target_contour(relaxed_mask, frame.shape[:2])
+            mask = relaxed_mask
+
+        if contour is None:
             return False, 0.0, 0.0, 0.0, False, {"mask": mask}
 
+        height, width = frame.shape[:2]
         moments = cv2.moments(contour)
         if moments["m00"] == 0:
             return False, 0.0, 0.0, 0.0, False, {"mask": mask}
@@ -459,7 +510,10 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         region = frame[y0:y1, x0:x1]
         region_target = target_mask[y0:y1, x0:x1]
         gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-        dark_mask = cv2.inRange(gray, 0, 80)
+        # Relative to overall frame brightness: a dim room is not an occlusion.
+        frame_mean = float(np.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
+        dark_cutoff = int(clamp(frame_mean * 0.55, 25, 80))
+        dark_mask = cv2.inRange(gray, 0, dark_cutoff)
         dark_mask[region_target > 0] = 0
         dark_ratio = cv2.countNonZero(dark_mask) / float(dark_mask.size)
         return dark_ratio >= self.occlusion_dark_ratio, dark_ratio
@@ -806,8 +860,8 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
                 self.action_status = "partial-target-rotate"
                 self.send_move(0, turn)
             else:
-                self.action_status = "partial-target-stop"
-                self.stop_motors()
+                self.action_status = "partial-target-forward"
+                self.send_move(PARTIAL_TARGET_FORWARD_Y, 0)
         elif turn != 0 and not target_centered:
             self.action_status = "rotate-to-center"
             self.send_move(0, turn)
