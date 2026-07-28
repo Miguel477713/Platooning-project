@@ -19,7 +19,7 @@ class SeguidorDiferencialPID:
         self.Ki = 0.0 
         
         # Velocidad muy baja y controlada
-        self.velocidad_base = -800 
+        self.velocidad_base = -600 
         self.invertir_correccion = True 
         
         # ========================================================
