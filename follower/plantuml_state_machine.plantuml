@@ -10,18 +10,21 @@ WAIT_FOR_ASSIGNMENT : wait for MQTT assignment
 WAIT_FOR_ASSIGNMENT --> GLOBAL_SEARCH : receive ASSIGNMENT\nset initial target/color
 
 GLOBAL_SEARCH : global_detect(current_target_color)
-GLOBAL_SEARCH : if not detected and Superintendent far -> global_search_guided_motion()
-GLOBAL_SEARCH : if not detected and no Superintendent -> global_search_stop()
-GLOBAL_SEARCH --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
+GLOBAL_SEARCH : get fresh Superintendent measurement
+GLOBAL_SEARCH : if Superintendent far -> global_search_guided_motion()
+GLOBAL_SEARCH : if no Superintendent -> global_search_stop()
+GLOBAL_SEARCH --> GLOBAL_APPROACH : target detected\nand Superintendent distance <= 1.10m\npublish TARGET_FOUND_GLOBAL
 GLOBAL_SEARCH --> GLOBAL_VISUAL_ACQUIRE : target not detected\nand Superintendent distance <= 1.10m\npublish SUPERINTENDENT_ACQUIRE_RANGE_REACHED
+GLOBAL_SEARCH --> GLOBAL_SEARCH : target detected\nbut Superintendent distance > 1.10m
 GLOBAL_SEARCH --> GLOBAL_SEARCH : target not detected
 
 GLOBAL_VISUAL_ACQUIRE : global_detect(current_target_color)
+GLOBAL_VISUAL_ACQUIRE : get fresh Superintendent measurement
 GLOBAL_VISUAL_ACQUIRE : pan camera left/right
 GLOBAL_VISUAL_ACQUIRE : if pan near limit -> rotate body in place
 GLOBAL_VISUAL_ACQUIRE : otherwise hold position
 GLOBAL_VISUAL_ACQUIRE : stop between rotate attempts to settle image
-GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH : target detected\npublish TARGET_FOUND_GLOBAL
+GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH : fresh Superintendent measurement\nand target detected\npublish TARGET_FOUND_GLOBAL
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : Superintendent stale
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : timeout after 60s\npublish GLOBAL_VISUAL_ACQUIRE_TIMEOUT
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_VISUAL_ACQUIRE : target not detected\ncontinue acquire

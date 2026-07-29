@@ -40,9 +40,9 @@ class FollowerStateMachine:
         self.superintendent_source_marker = superintendent_source_marker
         self.superintendent_target_marker = superintendent_target_marker
         self.superintendent_measurement: Optional[SuperintendentMeasurement] = None
-        self.superintendent_measurement_timeout_s = 1.0
+        self.superintendent_measurement_timeout_s = 5.0
         self.superintendent_unavailable_time = 0.0
-        self.superintendent_unavailable_timeout_s = 1.0
+        self.superintendent_unavailable_timeout_s = 5.0
         self.global_visual_acquire_started_time = 0.0
 
         self.impl = implementation or FollowerRobotImplementation()
