@@ -31,3 +31,10 @@ mosquitto_sub -h 10.0.7.51 -t "platoon/robot/Hexapod1/#" -v
 #Free GPIO's
 sudo pkill -9 -f "run_follower.py"
 
+#Run follower
+sudo python3 /Platooning-project/run_follower.py \
+  --lock-tilt \
+  --robot-id Hexapod1 \
+  --broker 10.0.7.51 \
+  --superintendent-source-marker pink \
+  --superintendent-target-marker green
