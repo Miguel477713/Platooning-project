@@ -164,52 +164,66 @@ class FollowerStateMachine:
 
     def handle_global_search(self) -> None:
         result = self.impl.global_detect(self.current_target_color)
+        measurement = self.get_fresh_superintendent_measurement()
 
         if result.detected:
-            self.last_seen_time = time.time()
-            self.publish_global_target_found(result)
-            self.transition_to(State.GLOBAL_APPROACH)
-        else:
-            measurement = self.get_fresh_superintendent_measurement()
+            if measurement is not None and measurement.distance_m <= SUPERINTENDENT_ACQUIRE_RANGE_M:
+                self.last_seen_time = time.time()
+                self.publish_global_target_found(result)
+                self.transition_to(State.GLOBAL_APPROACH)
+                return
+
             if measurement is not None:
-                if measurement.distance_m <= SUPERINTENDENT_ACQUIRE_RANGE_M:
-                    self.impl.stop_motors()
-                    self.publish_event(
-                        "SUPERINTENDENT_ACQUIRE_RANGE_REACHED",
-                        {
-                            "source_marker": measurement.source_marker,
-                            "target_marker": measurement.target_marker,
-                            "distance_m": measurement.distance_m,
-                            "dx_m": measurement.dx_m,
-                            "dy_m": measurement.dy_m,
-                        },
-                    )
-                    self.transition_to(State.GLOBAL_VISUAL_ACQUIRE)
+                self.impl.global_search_guided_motion(measurement)
+                return
+
+            if self.has_recent_superintendent_unavailable():
+                if self.impl.global_search_return_motion():
+                    self.publish_event("GLOBAL_SEARCH_RETURNING_BY_MEMORY")
                     return
 
-                self.impl.global_search_guided_motion(measurement)
-            else:
-                if self.has_recent_superintendent_unavailable():
-                    if self.impl.global_search_return_motion():
-                        self.publish_event("GLOBAL_SEARCH_RETURNING_BY_MEMORY")
-                        return
+            self.impl.global_search_stop()
+            return
 
-                self.impl.global_search_stop()
+        if measurement is not None:
+            if measurement.distance_m <= SUPERINTENDENT_ACQUIRE_RANGE_M:
+                self.impl.stop_motors()
+                self.publish_event(
+                    "SUPERINTENDENT_ACQUIRE_RANGE_REACHED",
+                    {
+                        "source_marker": measurement.source_marker,
+                        "target_marker": measurement.target_marker,
+                        "distance_m": measurement.distance_m,
+                        "dx_m": measurement.dx_m,
+                        "dy_m": measurement.dy_m,
+                    },
+                )
+                self.transition_to(State.GLOBAL_VISUAL_ACQUIRE)
+                return
+
+            self.impl.global_search_guided_motion(measurement)
+        else:
+            if self.has_recent_superintendent_unavailable():
+                if self.impl.global_search_return_motion():
+                    self.publish_event("GLOBAL_SEARCH_RETURNING_BY_MEMORY")
+                    return
+
+            self.impl.global_search_stop()
 
     def handle_global_visual_acquire(self) -> None:
         result = self.impl.global_detect(self.current_target_color)
-
-        if result.detected:
-            self.last_seen_time = time.time()
-            self.publish_global_target_found(result)
-            self.transition_to(State.GLOBAL_APPROACH)
-            return
-
         measurement = self.get_fresh_superintendent_measurement()
+
         if measurement is None:
             self.impl.stop_motors()
             self.publish_event("SUPERINTENDENT_MEASUREMENT_STALE")
             self.transition_to(State.GLOBAL_SEARCH)
+            return
+
+        if result.detected:
+            self.last_seen_time = time.time()
+            self.publish_global_target_found(result)
+            self.transition_to(State.GLOBAL_APPROACH)
             return
 
         if time.time() - self.global_visual_acquire_started_time > GLOBAL_VISUAL_ACQUIRE_TIMEOUT_S:
