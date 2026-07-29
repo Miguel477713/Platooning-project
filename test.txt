@@ -3,6 +3,7 @@
 mosquitto_pub -h 10.0.7.51 \
   -t 'platoon/assignment/Hexapod1' \
   -q 1 \
+  -r \
   -m '{
     "type": "ASSIGNMENT",
     "robot_id": "Hexapod1",
