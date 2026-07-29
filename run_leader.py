@@ -2,12 +2,19 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from motor import Ordinary_Car
-from infrared import Infrared
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parent
+FREENOVE_SERVER_DIR = (
+    PROJECT_ROOT
+    / "Freenove_4WD_Smart_Car_Kit_for_Raspberry_Pi"
+    / "Code"
+    / "Server"
+)
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+if str(FREENOVE_SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(FREENOVE_SERVER_DIR))
 
 
 class SeguidorDiferencialPID:
@@ -191,6 +198,9 @@ def main():
 
         ready_signal = FollowerReadySignal(args.broker, args.port, args.follower_id)
         ready_signal.start()
+
+    from infrared import Infrared
+    from motor import Ordinary_Car
 
     motor = Ordinary_Car()
     infrared = Infrared()

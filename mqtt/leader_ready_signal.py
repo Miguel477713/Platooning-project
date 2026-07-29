@@ -21,7 +21,7 @@ class FollowerReadySignal:
         self.last_signal: Optional[dict] = None
 
         self.transport = PahoMqttTransport(
-            client_id="LineaPausa-leader",
+            client_id="run-leader",
             subscriptions=[
                 (robot_event_topic(follower_id), 1),
                 (robot_status_topic(follower_id), 0),
