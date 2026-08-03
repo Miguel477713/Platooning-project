@@ -1,0 +1,84 @@
+---
+title: Follower Robot State Machine - Blob Color Platooning
+---
+stateDiagram-v2
+    [*] --> WAIT_FOR_ASSIGNMENT
+
+    WAIT_FOR_ASSIGNMENT: stop_motors()
+    WAIT_FOR_ASSIGNMENT: wait for MQTT assignment
+
+    GLOBAL_SEARCH: global_detect(current_target_color)
+    GLOBAL_SEARCH: get fresh Superintendent measurement
+    GLOBAL_SEARCH: Superintendent far -> global_search_guided_motion()
+    GLOBAL_SEARCH: no Superintendent -> return by memory, else stop
+
+    GLOBAL_VISUAL_ACQUIRE: global_detect(current_target_color)
+    GLOBAL_VISUAL_ACQUIRE: pan camera left/right
+    GLOBAL_VISUAL_ACQUIRE: pan near limit -> rotate body in place
+    GLOBAL_VISUAL_ACQUIRE: stop between rotate attempts to settle image
+
+    GLOBAL_APPROACH: global_detect(current_target_color)
+    GLOBAL_APPROACH: walk toward current target
+    GLOBAL_APPROACH: goal = ultrasonic distance OR target_area >= target_area_min
+
+    WAIT_FOR_FINAL_TARGET_READY: stop_motors()
+    WAIT_FOR_FINAL_TARGET_READY: wait for final target event
+
+    LOCAL_LOCK: local_detect(current_target_color)
+    LOCAL_LOCK: align with target
+    LOCAL_LOCK: count stable frames
+
+    LOCAL_FOLLOW: local_detect(color, min_area)
+    LOCAL_FOLLOW: local_follow_motion(result)
+    LOCAL_FOLLOW: publish STATUS every 1s
+    LOCAL_FOLLOW: action_status=hold means stopped and ready for leader resume
+
+    LOCAL_SEARCH_SCAN: (sub-behaviour of LOCAL_FOLLOW)
+    LOCAL_SEARCH_SCAN: local_search_scan_motion()
+    LOCAL_SEARCH_SCAN: camera centred, body rotates 360 in place
+    LOCAL_SEARCH_SCAN: blob must be >= local_search_area_floor() to count
+
+    LOST_TARGET: stop_motors()
+
+    EMERGENCY_STOP: stop_motors()
+
+    WAIT_FOR_ASSIGNMENT --> GLOBAL_SEARCH: receive ASSIGNMENT / set initial target+color
+
+    GLOBAL_SEARCH --> GLOBAL_SEARCH: target detected but Superintendent distance > 1.10m
+    GLOBAL_SEARCH --> GLOBAL_SEARCH: target not detected
+    GLOBAL_SEARCH --> GLOBAL_APPROACH: target detected and distance <= 1.10m / TARGET_FOUND_GLOBAL
+    GLOBAL_SEARCH --> GLOBAL_VISUAL_ACQUIRE: not detected and distance <= 1.10m / ACQUIRE_RANGE_REACHED
+
+    GLOBAL_VISUAL_ACQUIRE --> GLOBAL_VISUAL_ACQUIRE: target not detected, continue acquire
+    GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH: fresh measurement and target detected / TARGET_FOUND_GLOBAL
+    GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH: Superintendent stale
+    GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH: timeout 60s / GLOBAL_VISUAL_ACQUIRE_TIMEOUT
+
+    GLOBAL_APPROACH --> GLOBAL_APPROACH: target detected but goal not reached
+    GLOBAL_APPROACH --> GLOBAL_SEARCH: not detected and lost > 3s / TARGET_LOST_GLOBAL
+    GLOBAL_APPROACH --> LOCAL_LOCK: goal reached and current target == final target
+    GLOBAL_APPROACH --> WAIT_FOR_FINAL_TARGET_READY: goal reached but current target != final target
+
+    WAIT_FOR_FINAL_TARGET_READY --> GLOBAL_SEARCH: final target ready / switch to final target+color
+
+    LOCAL_LOCK --> LOCAL_LOCK: lock not stable yet
+    LOCAL_LOCK --> LOCAL_FOLLOW: stable lock / LOCAL_LOCK_ACQUIRED + READY
+    LOCAL_LOCK --> LOST_TARGET: local target not detected / LOCAL_LOCK_FAILED
+
+    LOCAL_FOLLOW --> LOCAL_FOLLOW: target detected, continue following
+    LOCAL_FOLLOW --> LOCAL_SEARCH_SCAN: target lost / LOCAL_SEARCH_SCANNING
+    LOCAL_SEARCH_SCAN --> LOCAL_SEARCH_SCAN: nothing big enough seen, keep rotating
+    LOCAL_SEARCH_SCAN --> LOCAL_FOLLOW: blob >= area floor / LOCAL_SEARCH_REACQUIRED
+
+    LOST_TARGET --> GLOBAL_SEARCH: search again for current target
+
+    EMERGENCY_STOP --> WAIT_FOR_ASSIGNMENT: RESET
+
+    WAIT_FOR_ASSIGNMENT --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
+    GLOBAL_SEARCH --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
+    GLOBAL_VISUAL_ACQUIRE --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
+    GLOBAL_APPROACH --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
+    WAIT_FOR_FINAL_TARGET_READY --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
+    LOCAL_LOCK --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
+    LOCAL_FOLLOW --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
+    LOST_TARGET --> EMERGENCY_STOP: STOP or EMERGENCY_STOP

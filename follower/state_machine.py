@@ -35,6 +35,8 @@ class FollowerStateMachine:
         self.last_seen_time = 0.0
         self.local_lock_counter = 0
         self.target_lost_timeout_s = 3.0
+        # True while LOCAL_FOLLOW is combing the horizon for a vanished target.
+        self.local_search_active = False
         self.required_local_lock_frames = 10
         self.last_status_time = 0.0
         self.superintendent_source_marker = superintendent_source_marker
@@ -304,6 +306,7 @@ class FollowerStateMachine:
             self.transition_to(State.LOST_TARGET)
             return
 
+        self.last_seen_time = time.time()
         self.impl.local_lock_motion(result)
 
         if self.local_lock_is_stable(result):
@@ -332,14 +335,25 @@ class FollowerStateMachine:
             self.transition_to(State.LOCAL_FOLLOW)
 
     def handle_local_follow(self) -> None:
-        result = self.impl.local_detect(self.current_target_color)
+        # While combing, only a blob of roughly the target's own size counts;
+        # otherwise the search latches onto small green specks in the room.
+        min_area = self.impl.local_search_area_floor() if self.local_search_active else 0.0
+        result = self.impl.local_detect(self.current_target_color, min_area=min_area)
 
         if not result.detected:
-            self.impl.stop_motors()
-            self.publish_event("TARGET_LOST_LOCAL", {"target_id": self.current_target_id})
-            self.transition_to(State.LOST_TARGET)
+            # Keep rotating in place, right around the full 360 degrees, until
+            # the target comes back into view.
+            if not self.local_search_active:
+                self.local_search_active = True
+                self.publish_event("LOCAL_SEARCH_SCANNING", {"target_id": self.current_target_id})
+            self.impl.local_search_scan_motion()
             return
 
+        if self.local_search_active:
+            self.local_search_active = False
+            self.publish_event("LOCAL_SEARCH_REACQUIRED", {"target_id": self.current_target_id})
+
+        self.last_seen_time = time.time()
         desired_gap_m = 1.0
         if self.assignment is not None:
             desired_gap_m = self.assignment.desired_gap_m
@@ -451,6 +465,8 @@ class FollowerStateMachine:
     def transition_to(self, new_state: State) -> None:
         old_state = self.state
         self.state = new_state
+        if new_state != State.LOCAL_FOLLOW:
+            self.local_search_active = False
         if new_state == State.GLOBAL_VISUAL_ACQUIRE:
             self.global_visual_acquire_started_time = time.time()
         if new_state in CAMERA_CONTROLLED_STATES and old_state not in CAMERA_CONTROLLED_STATES:

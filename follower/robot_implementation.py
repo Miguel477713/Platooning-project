@@ -40,6 +40,12 @@ VISUAL_ACQUIRE_MOVE_INTERVAL = 0.35
 VISUAL_ACQUIRE_PAN_STEP = 2
 VISUAL_ACQUIRE_ROTATE_PAN_THRESHOLD = 26
 VISUAL_ACQUIRE_ROTATE_STEP = 5
+LOCAL_SEARCH_ROTATE_STEP = 6
+LOCAL_SEARCH_MOVE_INTERVAL = 0.50
+# A reacquired blob must be at least this fraction of the area the target had
+# when it was last tracked, so small green specks never end the search.
+LOCAL_SEARCH_AREA_RATIO = 0.35
+LOCAL_SEARCH_AREA_FLOOR = 0.010
 GLOBAL_SEARCH_RETURN_MOVE_INTERVAL = 0.35
 GLOBAL_SEARCH_MEMORY_MAX_STEPS = 100
 
@@ -130,12 +136,12 @@ class FollowerRobotImplementation:
         print(f"[VISION] global search for color={target_color}")
         return DetectionResult(detected=False)
 
-    def local_detect(self, target_color: str) -> DetectionResult:
+    def local_detect(self, target_color: str, min_area: float = 0.0) -> DetectionResult:
         """Local/ROI blob tracking.
 
         Replace with real camera/blob tracking code.
         """
-        print(f"[VISION] local search for color={target_color}")
+        print(f"[VISION] local search for color={target_color}, min_area={min_area}")
         return DetectionResult(detected=False)
 
     # =====================================================
@@ -180,6 +186,12 @@ class FollowerRobotImplementation:
 
     def local_lock_motion(self, result: DetectionResult) -> None:
         print("[MOTOR] local lock alignment")
+
+    def local_search_scan_motion(self) -> None:
+        print("[MOTOR] local search 360 rotation")
+
+    def local_search_area_floor(self) -> float:
+        return 0.0
 
     def local_follow_motion(self, result: DetectionResult, desired_gap_m: float) -> None:
         error_m = None
@@ -242,6 +254,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.target_x = 0.0
         self.target_y = 0.0
         self.target_area = 0.0
+        self.last_tracked_area = 0.0
         self.target_occluded = False
         self.action_status = "idle"
         self.last_seen_time = 0.0
@@ -309,11 +322,11 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
     def global_detect(self, target_color: str) -> DetectionResult:
         return self._detect(target_color)
 
-    def local_detect(self, target_color: str) -> DetectionResult:
-        return self._detect(target_color)
+    def local_detect(self, target_color: str, min_area: float = 0.0) -> DetectionResult:
+        return self._detect(target_color, min_area=min_area)
 
     #Does not move camera
-    def _detect(self, target_color: str) -> DetectionResult:
+    def _detect(self, target_color: str, min_area: float = 0.0) -> DetectionResult:
         frame = self.get_latest_frame()
         if frame is None:
             if time.time() - self.last_frame_time > FRAME_TIMEOUT:
@@ -324,6 +337,12 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         distance_cm = self.request_ultrasonic_distance()
         distance_m = None if distance_cm is None else distance_cm / 100.0
 
+        if detected and area < min_area:
+            # Too small to be the target we were following: a speck of green
+            # somewhere else in the room. Keep searching.
+            detected = False
+            self.action_status = "local-search-reject-small"
+
         if not detected:
             self.target_occluded = False
             self.show_debug_frame(frame, debug, target_color, False, distance_m)
@@ -332,6 +351,7 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
         self.target_x = x
         self.target_y = y
         self.target_area = area
+        self.last_tracked_area = area
         self.target_occluded = occluded
         self.last_seen_time = time.time()
         self.show_debug_frame(frame, debug, target_color, True, distance_m)
@@ -773,6 +793,29 @@ class FreenoveDirectRobotImplementation(FollowerRobotImplementation):
     def local_follow_motion(self, result: DetectionResult, desired_gap_m: float) -> None:
         self.center_camera()
         self.control_movement(result.distance_m, desired_gap_m)
+
+    def local_search_scan_motion(self) -> None:
+        """Comb the full horizon by rotating the body 360 degrees in place.
+
+        The camera is held level and centred so the only thing that moves is the
+        heading: the robot keeps turning the same way, sweeping past every
+        bearing, until the caller stops asking (i.e. the target is reacquired).
+        """
+        self.pan_angle = 0
+        self.tilt_angle = 0
+        self.send_camera()
+
+        now = time.time()
+        if now - self.last_visual_acquire_move < LOCAL_SEARCH_MOVE_INTERVAL:
+            return
+        self.last_visual_acquire_move = now
+
+        self.action_status = "local-search-360"
+        self.send_move(0, self.search_direction * LOCAL_SEARCH_ROTATE_STEP)
+
+    def local_search_area_floor(self) -> float:
+        """Minimum blob area that counts as the real target during a re-scan."""
+        return max(LOCAL_SEARCH_AREA_FLOOR, self.last_tracked_area * LOCAL_SEARCH_AREA_RATIO)
 
     def send_camera(self, force=False):
         servo_x = clamp(CAMERA_CENTER_X + self.pan_angle, 50, 180)
