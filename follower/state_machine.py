@@ -34,7 +34,10 @@ class FollowerStateMachine:
         self.final_target_ready = False
         self.last_seen_time = 0.0
         self.local_lock_counter = 0
+        self.local_lock_reason = "not-started"
         self.target_lost_timeout_s = 3.0
+        # True when GLOBAL_VISUAL_ACQUIRE is recovering a target lost locally.
+        self.local_recovery_active = False
         self.required_local_lock_frames = 10
         self.last_status_time = 0.0
         self.superintendent_source_marker = superintendent_source_marker
@@ -64,6 +67,8 @@ class FollowerStateMachine:
         self.current_target_color = assignment.initial_target_color
         self.final_target_ready = False
         self.local_lock_counter = 0
+        self.local_lock_reason = "assignment-received"
+        self.local_recovery_active = False
         self.superintendent_measurement = None
         self.superintendent_unavailable_time = 0.0
         self.impl.clear_global_search_memory()
@@ -122,6 +127,8 @@ class FollowerStateMachine:
         self.current_target_color = None
         self.final_target_ready = False
         self.local_lock_counter = 0
+        self.local_lock_reason = "reset"
+        self.local_recovery_active = False
         self.impl.clear_global_search_memory()
         self.transition_to(State.WAIT_FOR_ASSIGNMENT)
 
@@ -150,8 +157,6 @@ class FollowerStateMachine:
             self.handle_local_lock()
         elif self.state == State.LOCAL_FOLLOW:
             self.handle_local_follow()
-        elif self.state == State.LOST_TARGET:
-            self.handle_lost_target()
         elif self.state == State.EMERGENCY_STOP:
             self.handle_emergency_stop()
 
@@ -211,6 +216,26 @@ class FollowerStateMachine:
             self.impl.global_search_stop()
 
     def handle_global_visual_acquire(self) -> None:
+        if self.local_recovery_active:
+            result = self.impl.local_detect(
+                self.current_target_color,
+                min_area=self.impl.local_search_area_floor(),
+            )
+
+            if result.detected:
+                self.impl.stop_motors()
+                self.last_seen_time = time.time()
+                self.local_lock_counter = 0
+                self.publish_event(
+                    "LOCAL_SEARCH_REACQUIRED",
+                    {"target_id": self.current_target_id},
+                )
+                self.transition_to(State.LOCAL_LOCK)
+                return
+
+            self.impl.local_search_scan_motion()
+            return
+
         result = self.impl.global_detect(self.current_target_color)
         measurement = self.get_fresh_superintendent_measurement()
 
@@ -301,17 +326,23 @@ class FollowerStateMachine:
         if not result.detected:
             self.impl.stop_motors()
             self.publish_event("LOCAL_LOCK_FAILED", {"target_id": self.current_target_id})
-            self.transition_to(State.LOST_TARGET)
+            self.local_recovery_active = True
+            self.transition_to(State.GLOBAL_VISUAL_ACQUIRE)
             return
 
+        self.last_seen_time = time.time()
         self.impl.local_lock_motion(result)
 
-        if self.local_lock_is_stable(result):
+        stable, reason = self.local_lock_stability(result)
+        self.local_lock_reason = reason
+
+        if stable:
             self.local_lock_counter += 1
         else:
             self.local_lock_counter = 0
 
         if self.local_lock_counter >= self.required_local_lock_frames:
+            self.local_recovery_active = False
             self.publish_event(
                 "LOCAL_LOCK_ACQUIRED",
                 {
@@ -336,19 +367,17 @@ class FollowerStateMachine:
 
         if not result.detected:
             self.impl.stop_motors()
-            self.publish_event("TARGET_LOST_LOCAL", {"target_id": self.current_target_id})
-            self.transition_to(State.LOST_TARGET)
+            self.local_recovery_active = True
+            self.publish_event("LOCAL_SEARCH_SCANNING", {"target_id": self.current_target_id})
+            self.transition_to(State.GLOBAL_VISUAL_ACQUIRE)
             return
 
+        self.last_seen_time = time.time()
         desired_gap_m = 1.0
         if self.assignment is not None:
             desired_gap_m = self.assignment.desired_gap_m
 
         self.impl.local_follow_motion(result, desired_gap_m=desired_gap_m)
-
-    def handle_lost_target(self) -> None:
-        self.impl.stop_motors()
-        self.transition_to(State.GLOBAL_SEARCH)
 
     def handle_emergency_stop(self) -> None:
         self.impl.stop_motors()
@@ -386,14 +415,16 @@ class FollowerStateMachine:
 
         return self.assignment.desired_gap_m
 
-    def local_lock_is_stable(self, result: DetectionResult) -> bool:
+    def local_lock_stability(self, result: DetectionResult):
         if not result.detected:
-            return False
-        if result.distance_m is None:
-            return False
-        if result.confidence < 0.7:
-            return False
-        return True
+            return False, "not-detected"
+        if result.occluded:
+            return False, "occluded"
+        if result.target_x is not None and abs(result.target_x) > 0.20:
+            return False, "centering-x"
+        if result.target_y is not None and abs(result.target_y) > 0.20:
+            return False, "centering-y"
+        return True, "stable"
 
     def target_has_been_lost_too_long(self) -> bool:
         elapsed = time.time() - self.last_seen_time
@@ -468,6 +499,9 @@ class FollowerStateMachine:
             "superintendent_source_marker": self.superintendent_source_marker,
             "superintendent_target_marker": self.superintendent_target_marker,
             "action_status": getattr(self.impl, "action_status", None),
+            "local_lock_counter": self.local_lock_counter,
+            "local_lock_required": self.required_local_lock_frames,
+            "local_lock_reason": self.local_lock_reason,
             "timestamp": time.time(),
         }
 

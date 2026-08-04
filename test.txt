@@ -38,4 +38,6 @@ sudo python3 /Platooning-project/run_follower.py \
   --robot-id Hexapod1 \
   --broker 10.0.7.51 \
   --superintendent-source-marker pink \
-  --superintendent-target-marker green
+  --superintendent-target-marker green \
+  --show-video
+sudo -E python3 -u run_follower.py   --lock-tilt   --robot-id Hexapod1   --broker 10.0.7.51   --superintendent-source-marker pink   --superintendent-target-marker green   --show-video --target-area 0.12

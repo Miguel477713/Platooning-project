@@ -18,13 +18,11 @@ GLOBAL_SEARCH --> GLOBAL_VISUAL_ACQUIRE : target not detected\nand Superintenden
 GLOBAL_SEARCH --> GLOBAL_SEARCH : target detected\nbut Superintendent distance > 1.10m
 GLOBAL_SEARCH --> GLOBAL_SEARCH : target not detected
 
-GLOBAL_VISUAL_ACQUIRE : global_detect(current_target_color)
-GLOBAL_VISUAL_ACQUIRE : get fresh Superintendent measurement
-GLOBAL_VISUAL_ACQUIRE : pan camera left/right
-GLOBAL_VISUAL_ACQUIRE : if pan near limit -> rotate body in place
-GLOBAL_VISUAL_ACQUIRE : otherwise hold position
-GLOBAL_VISUAL_ACQUIRE : stop between rotate attempts to settle image
+GLOBAL_VISUAL_ACQUIRE : global_detect() for initial acquire
+GLOBAL_VISUAL_ACQUIRE : local_detect(color, area floor) for local recovery
+GLOBAL_VISUAL_ACQUIRE : centre camera and rotate body during local recovery
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH : fresh Superintendent measurement\nand target detected\npublish TARGET_FOUND_GLOBAL
+GLOBAL_VISUAL_ACQUIRE --> LOCAL_LOCK : locally lost target detected\npublish LOCAL_SEARCH_REACQUIRED
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : Superintendent stale
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH : timeout after 60s\npublish GLOBAL_VISUAL_ACQUIRE_TIMEOUT
 GLOBAL_VISUAL_ACQUIRE --> GLOBAL_VISUAL_ACQUIRE : target not detected\ncontinue acquire
@@ -43,7 +41,7 @@ WAIT_FOR_FINAL_TARGET_READY --> GLOBAL_SEARCH : final target ready\nswitch to fi
 LOCAL_LOCK : local_detect(current_target_color)
 LOCAL_LOCK : align with target
 LOCAL_LOCK : count stable frames
-LOCAL_LOCK --> LOST_TARGET : local target not detected
+LOCAL_LOCK --> GLOBAL_VISUAL_ACQUIRE : local target not detected\npublish LOCAL_LOCK_FAILED
 LOCAL_LOCK --> LOCAL_LOCK : lock not stable yet
 LOCAL_LOCK --> LOCAL_FOLLOW : stable lock acquired\npublish LOCAL_LOCK_ACQUIRED\npublish READY
 
@@ -52,10 +50,7 @@ LOCAL_FOLLOW : local_follow_motion(result)
 LOCAL_FOLLOW : publish STATUS every 1s
 LOCAL_FOLLOW : action_status=hold means stopped\nand ready for leader resume
 LOCAL_FOLLOW --> LOCAL_FOLLOW : target detected\ncontinue following
-LOCAL_FOLLOW --> LOST_TARGET : target lost\npublish TARGET_LOST_LOCAL
-
-LOST_TARGET : stop_motors()
-LOST_TARGET --> GLOBAL_SEARCH : search again\nfor current target
+LOCAL_FOLLOW --> GLOBAL_VISUAL_ACQUIRE : target lost\npublish LOCAL_SEARCH_SCANNING
 
 EMERGENCY_STOP : stop_motors()
 EMERGENCY_STOP --> WAIT_FOR_ASSIGNMENT : RESET
@@ -67,6 +62,5 @@ GLOBAL_APPROACH --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
 WAIT_FOR_FINAL_TARGET_READY --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
 LOCAL_LOCK --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
 LOCAL_FOLLOW --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
-LOST_TARGET --> EMERGENCY_STOP : STOP or EMERGENCY_STOP
 
 @enduml
