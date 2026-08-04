@@ -34,6 +34,7 @@ class FollowerStateMachine:
         self.final_target_ready = False
         self.last_seen_time = 0.0
         self.local_lock_counter = 0
+        self.local_lock_reason = "not-started"
         self.target_lost_timeout_s = 3.0
         # True when GLOBAL_VISUAL_ACQUIRE is recovering a target lost locally.
         self.local_recovery_active = False
@@ -66,6 +67,7 @@ class FollowerStateMachine:
         self.current_target_color = assignment.initial_target_color
         self.final_target_ready = False
         self.local_lock_counter = 0
+        self.local_lock_reason = "assignment-received"
         self.local_recovery_active = False
         self.superintendent_measurement = None
         self.superintendent_unavailable_time = 0.0
@@ -125,6 +127,7 @@ class FollowerStateMachine:
         self.current_target_color = None
         self.final_target_ready = False
         self.local_lock_counter = 0
+        self.local_lock_reason = "reset"
         self.local_recovery_active = False
         self.impl.clear_global_search_memory()
         self.transition_to(State.WAIT_FOR_ASSIGNMENT)
@@ -330,7 +333,10 @@ class FollowerStateMachine:
         self.last_seen_time = time.time()
         self.impl.local_lock_motion(result)
 
-        if self.local_lock_is_stable(result):
+        stable, reason = self.local_lock_stability(result)
+        self.local_lock_reason = reason
+
+        if stable:
             self.local_lock_counter += 1
         else:
             self.local_lock_counter = 0
@@ -409,14 +415,16 @@ class FollowerStateMachine:
 
         return self.assignment.desired_gap_m
 
-    def local_lock_is_stable(self, result: DetectionResult) -> bool:
+    def local_lock_stability(self, result: DetectionResult):
         if not result.detected:
-            return False
-        if result.distance_m is None:
-            return False
-        if result.confidence < 0.7:
-            return False
-        return True
+            return False, "not-detected"
+        if result.occluded:
+            return False, "occluded"
+        if result.target_x is not None and abs(result.target_x) > 0.20:
+            return False, "centering-x"
+        if result.target_y is not None and abs(result.target_y) > 0.20:
+            return False, "centering-y"
+        return True, "stable"
 
     def target_has_been_lost_too_long(self) -> bool:
         elapsed = time.time() - self.last_seen_time
@@ -491,6 +499,9 @@ class FollowerStateMachine:
             "superintendent_source_marker": self.superintendent_source_marker,
             "superintendent_target_marker": self.superintendent_target_marker,
             "action_status": getattr(self.impl, "action_status", None),
+            "local_lock_counter": self.local_lock_counter,
+            "local_lock_required": self.required_local_lock_frames,
+            "local_lock_reason": self.local_lock_reason,
             "timestamp": time.time(),
         }
 
