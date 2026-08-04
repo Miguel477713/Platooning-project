@@ -12,10 +12,9 @@ stateDiagram-v2
     GLOBAL_SEARCH: Superintendent far -> global_search_guided_motion()
     GLOBAL_SEARCH: no Superintendent -> return by memory, else stop
 
-    GLOBAL_VISUAL_ACQUIRE: global_detect(current_target_color)
-    GLOBAL_VISUAL_ACQUIRE: pan camera left/right
-    GLOBAL_VISUAL_ACQUIRE: pan near limit -> rotate body in place
-    GLOBAL_VISUAL_ACQUIRE: stop between rotate attempts to settle image
+    GLOBAL_VISUAL_ACQUIRE: global_detect() for initial acquire
+    GLOBAL_VISUAL_ACQUIRE: local_detect(color, area floor) for local recovery
+    GLOBAL_VISUAL_ACQUIRE: centre camera and rotate body during local recovery
 
     GLOBAL_APPROACH: global_detect(current_target_color)
     GLOBAL_APPROACH: walk toward current target
@@ -33,13 +32,6 @@ stateDiagram-v2
     LOCAL_FOLLOW: publish STATUS every 1s
     LOCAL_FOLLOW: action_status=hold means stopped and ready for leader resume
 
-    LOCAL_SEARCH_SCAN: (sub-behaviour of LOCAL_FOLLOW)
-    LOCAL_SEARCH_SCAN: local_search_scan_motion()
-    LOCAL_SEARCH_SCAN: camera centred, body rotates 360 in place
-    LOCAL_SEARCH_SCAN: blob must be >= local_search_area_floor() to count
-
-    LOST_TARGET: stop_motors()
-
     EMERGENCY_STOP: stop_motors()
 
     WAIT_FOR_ASSIGNMENT --> GLOBAL_SEARCH: receive ASSIGNMENT / set initial target+color
@@ -51,6 +43,7 @@ stateDiagram-v2
 
     GLOBAL_VISUAL_ACQUIRE --> GLOBAL_VISUAL_ACQUIRE: target not detected, continue acquire
     GLOBAL_VISUAL_ACQUIRE --> GLOBAL_APPROACH: fresh measurement and target detected / TARGET_FOUND_GLOBAL
+    GLOBAL_VISUAL_ACQUIRE --> LOCAL_LOCK: locally lost target detected / LOCAL_SEARCH_REACQUIRED
     GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH: Superintendent stale
     GLOBAL_VISUAL_ACQUIRE --> GLOBAL_SEARCH: timeout 60s / GLOBAL_VISUAL_ACQUIRE_TIMEOUT
 
@@ -63,14 +56,10 @@ stateDiagram-v2
 
     LOCAL_LOCK --> LOCAL_LOCK: lock not stable yet
     LOCAL_LOCK --> LOCAL_FOLLOW: stable lock / LOCAL_LOCK_ACQUIRED + READY
-    LOCAL_LOCK --> LOST_TARGET: local target not detected / LOCAL_LOCK_FAILED
+    LOCAL_LOCK --> GLOBAL_VISUAL_ACQUIRE: local target not detected / LOCAL_LOCK_FAILED
 
     LOCAL_FOLLOW --> LOCAL_FOLLOW: target detected, continue following
-    LOCAL_FOLLOW --> LOCAL_SEARCH_SCAN: target lost / LOCAL_SEARCH_SCANNING
-    LOCAL_SEARCH_SCAN --> LOCAL_SEARCH_SCAN: nothing big enough seen, keep rotating
-    LOCAL_SEARCH_SCAN --> LOCAL_FOLLOW: blob >= area floor / LOCAL_SEARCH_REACQUIRED
-
-    LOST_TARGET --> GLOBAL_SEARCH: search again for current target
+    LOCAL_FOLLOW --> GLOBAL_VISUAL_ACQUIRE: target lost / LOCAL_SEARCH_SCANNING
 
     EMERGENCY_STOP --> WAIT_FOR_ASSIGNMENT: RESET
 
@@ -81,4 +70,3 @@ stateDiagram-v2
     WAIT_FOR_FINAL_TARGET_READY --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
     LOCAL_LOCK --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
     LOCAL_FOLLOW --> EMERGENCY_STOP: STOP or EMERGENCY_STOP
-    LOST_TARGET --> EMERGENCY_STOP: STOP or EMERGENCY_STOP

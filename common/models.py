@@ -11,7 +11,6 @@ class State(Enum):
     WAIT_FOR_FINAL_TARGET_READY = auto()
     LOCAL_LOCK = auto()
     LOCAL_FOLLOW = auto()
-    LOST_TARGET = auto()
     EMERGENCY_STOP = auto()
 
 

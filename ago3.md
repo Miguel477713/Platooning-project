@@ -62,8 +62,9 @@ Related:
   so the search combs the full 360° horizon. Rotation step `LOCAL_SEARCH_ROTATE_STEP` (now 6°),
   issued every `LOCAL_SEARCH_MOVE_INTERVAL` (0.50 s — raised from 0.35 s because the swerving was
   too aggressive). No forward/backward motion while scanning.
-- **No timeout:** `LOCAL_FOLLOW` keeps rotating until it reacquires; it no longer falls out to
-  `LOST_TARGET` / `GLOBAL_SEARCH` on its own.
+- **No timeout:** when `LOCAL_FOLLOW` loses the target it reuses `GLOBAL_VISUAL_ACQUIRE`, which
+  keeps rotating until the target is reacquired. Recovery then reuses `LOCAL_LOCK` before returning
+  to `LOCAL_FOLLOW`; no dedicated local-search or lost-target state is needed.
 - **Size gate so small green dots don't stop the search** — this was the real "gets stuck" cause,
   since the scan would otherwise latch onto any blob above the tiny 0.002 floor:
   - `local_detect()` now takes a `min_area` argument, applied inside `_detect()`; a detection under
@@ -73,10 +74,11 @@ Related:
   - `last_tracked_area` is a new field holding the area the target had the last time it was
     genuinely tracked, so the gate scales with the object and with distance.
   - Normal following passes `min_area=0` and is unaffected.
-- **State machine:** new `local_search_active` flag; set when the scan starts (publishes
-  `LOCAL_SEARCH_SCANNING`), cleared on reacquire (`LOCAL_SEARCH_REACQUIRED`) and on any transition
-  out of `LOCAL_FOLLOW`. `last_seen_time` is now also refreshed on every successful local-follow and
-  local-lock frame.
+- **State machine:** `local_recovery_active` distinguishes recovery use of
+  `GLOBAL_VISUAL_ACQUIRE` from initial global acquisition. The scan publishes
+  `LOCAL_SEARCH_SCANNING`; detection publishes `LOCAL_SEARCH_REACQUIRED` and transitions to
+  `LOCAL_LOCK`, then stable lock returns to `LOCAL_FOLLOW`. `last_seen_time` is refreshed on every
+  successful local-follow and local-lock frame.
 
 ## 4. Known defect — the search overshoots
 

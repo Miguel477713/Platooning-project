@@ -35,8 +35,8 @@ class FollowerStateMachine:
         self.last_seen_time = 0.0
         self.local_lock_counter = 0
         self.target_lost_timeout_s = 3.0
-        # True while LOCAL_FOLLOW is combing the horizon for a vanished target.
-        self.local_search_active = False
+        # True when GLOBAL_VISUAL_ACQUIRE is recovering a target lost locally.
+        self.local_recovery_active = False
         self.required_local_lock_frames = 10
         self.last_status_time = 0.0
         self.superintendent_source_marker = superintendent_source_marker
@@ -66,6 +66,7 @@ class FollowerStateMachine:
         self.current_target_color = assignment.initial_target_color
         self.final_target_ready = False
         self.local_lock_counter = 0
+        self.local_recovery_active = False
         self.superintendent_measurement = None
         self.superintendent_unavailable_time = 0.0
         self.impl.clear_global_search_memory()
@@ -124,6 +125,7 @@ class FollowerStateMachine:
         self.current_target_color = None
         self.final_target_ready = False
         self.local_lock_counter = 0
+        self.local_recovery_active = False
         self.impl.clear_global_search_memory()
         self.transition_to(State.WAIT_FOR_ASSIGNMENT)
 
@@ -152,8 +154,6 @@ class FollowerStateMachine:
             self.handle_local_lock()
         elif self.state == State.LOCAL_FOLLOW:
             self.handle_local_follow()
-        elif self.state == State.LOST_TARGET:
-            self.handle_lost_target()
         elif self.state == State.EMERGENCY_STOP:
             self.handle_emergency_stop()
 
@@ -213,6 +213,26 @@ class FollowerStateMachine:
             self.impl.global_search_stop()
 
     def handle_global_visual_acquire(self) -> None:
+        if self.local_recovery_active:
+            result = self.impl.local_detect(
+                self.current_target_color,
+                min_area=self.impl.local_search_area_floor(),
+            )
+
+            if result.detected:
+                self.impl.stop_motors()
+                self.last_seen_time = time.time()
+                self.local_lock_counter = 0
+                self.publish_event(
+                    "LOCAL_SEARCH_REACQUIRED",
+                    {"target_id": self.current_target_id},
+                )
+                self.transition_to(State.LOCAL_LOCK)
+                return
+
+            self.impl.local_search_scan_motion()
+            return
+
         result = self.impl.global_detect(self.current_target_color)
         measurement = self.get_fresh_superintendent_measurement()
 
@@ -303,7 +323,8 @@ class FollowerStateMachine:
         if not result.detected:
             self.impl.stop_motors()
             self.publish_event("LOCAL_LOCK_FAILED", {"target_id": self.current_target_id})
-            self.transition_to(State.LOST_TARGET)
+            self.local_recovery_active = True
+            self.transition_to(State.GLOBAL_VISUAL_ACQUIRE)
             return
 
         self.last_seen_time = time.time()
@@ -315,6 +336,7 @@ class FollowerStateMachine:
             self.local_lock_counter = 0
 
         if self.local_lock_counter >= self.required_local_lock_frames:
+            self.local_recovery_active = False
             self.publish_event(
                 "LOCAL_LOCK_ACQUIRED",
                 {
@@ -335,23 +357,14 @@ class FollowerStateMachine:
             self.transition_to(State.LOCAL_FOLLOW)
 
     def handle_local_follow(self) -> None:
-        # While combing, only a blob of roughly the target's own size counts;
-        # otherwise the search latches onto small green specks in the room.
-        min_area = self.impl.local_search_area_floor() if self.local_search_active else 0.0
-        result = self.impl.local_detect(self.current_target_color, min_area=min_area)
+        result = self.impl.local_detect(self.current_target_color)
 
         if not result.detected:
-            # Keep rotating in place, right around the full 360 degrees, until
-            # the target comes back into view.
-            if not self.local_search_active:
-                self.local_search_active = True
-                self.publish_event("LOCAL_SEARCH_SCANNING", {"target_id": self.current_target_id})
-            self.impl.local_search_scan_motion()
+            self.impl.stop_motors()
+            self.local_recovery_active = True
+            self.publish_event("LOCAL_SEARCH_SCANNING", {"target_id": self.current_target_id})
+            self.transition_to(State.GLOBAL_VISUAL_ACQUIRE)
             return
-
-        if self.local_search_active:
-            self.local_search_active = False
-            self.publish_event("LOCAL_SEARCH_REACQUIRED", {"target_id": self.current_target_id})
 
         self.last_seen_time = time.time()
         desired_gap_m = 1.0
@@ -359,10 +372,6 @@ class FollowerStateMachine:
             desired_gap_m = self.assignment.desired_gap_m
 
         self.impl.local_follow_motion(result, desired_gap_m=desired_gap_m)
-
-    def handle_lost_target(self) -> None:
-        self.impl.stop_motors()
-        self.transition_to(State.GLOBAL_SEARCH)
 
     def handle_emergency_stop(self) -> None:
         self.impl.stop_motors()
@@ -465,8 +474,6 @@ class FollowerStateMachine:
     def transition_to(self, new_state: State) -> None:
         old_state = self.state
         self.state = new_state
-        if new_state != State.LOCAL_FOLLOW:
-            self.local_search_active = False
         if new_state == State.GLOBAL_VISUAL_ACQUIRE:
             self.global_visual_acquire_started_time = time.time()
         if new_state in CAMERA_CONTROLLED_STATES and old_state not in CAMERA_CONTROLLED_STATES:
